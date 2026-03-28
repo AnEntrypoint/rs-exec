@@ -181,6 +181,17 @@ async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, run
     env_vars.insert("RUNTIME".into(), runtime.to_string());
     env_vars.insert("CWD".into(), cwd.to_string());
     env_vars.insert("CODE_FILE".into(), code_file.to_string_lossy().to_string());
+    #[cfg(windows)]
+    let mut child = {
+        use std::os::windows::process::CommandExt;
+        Command::new(exec_process_bin())
+            .envs(&env_vars)
+            .current_dir(cwd)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .creation_flags(0x08000000)
+            .spawn()?
+    };
+    #[cfg(not(windows))]
     let mut child = Command::new(exec_process_bin())
         .envs(&env_vars)
         .current_dir(cwd)
