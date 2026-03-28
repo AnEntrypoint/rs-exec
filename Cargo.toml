@@ -3,6 +3,10 @@ name = "rs-exec"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "rs_exec"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rs-exec"
 path = "src/main.rs"

@@ -17,13 +17,13 @@ fn exec_process_bin() -> String {
         .to_string_lossy().to_string()
 }
 
-struct AppState {
+pub struct AppState {
     store: Arc<BackgroundTaskStore>,
     active: Mutex<HashMap<u64, (u32, Option<ChildStdin>)>>,
 }
 
 #[derive(Deserialize)]
-struct RpcRequest {
+pub struct RpcRequest {
     method: String,
     params: Option<Value>,
     id: Option<Value>,
