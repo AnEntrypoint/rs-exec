@@ -1,9 +1,20 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::env;
 use std::fs;
 use std::time::Duration;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn spawn_no_window(cmd: &mut Command) -> std::io::Result<Child> {
+    #[cfg(windows)]
+    { cmd.creation_flags(CREATE_NO_WINDOW).spawn() }
+    #[cfg(not(windows))]
+    { cmd.spawn() }
+}
 
 mod runtime;
 
@@ -106,13 +117,11 @@ fn run_compiled(task_id: u64, port: u16, mut compile_child: std::process::Child,
     let run_child = if phase.runtime == "java" {
         let cp = phase.cp.as_deref().unwrap_or(&phase.cwd);
         let cn = phase.class_name.as_deref().unwrap_or("Main");
-        Command::new("java").args(["-cp", cp, cn])
-            .current_dir(&phase.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn()
+        spawn_no_window(Command::new("java").args(["-cp", cp, cn])
+            .current_dir(&phase.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))
     } else {
-        Command::new(&phase.bin_path)
-            .current_dir(&phase.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn()
+        spawn_no_window(Command::new(&phase.bin_path)
+            .current_dir(&phase.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))
     };
     match run_child {
         Err(e) => rpc_sync(port, "completeTask", serde_json::json!({ "taskId": task_id, "result": { "success": false, "exitCode": 1, "stdout": "", "stderr": e.to_string(), "error": e.to_string() } })),

@@ -3,6 +3,17 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use tempfile::TempDir;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn spawn_no_window(cmd: &mut Command) -> std::io::Result<Child> {
+    #[cfg(windows)]
+    { cmd.creation_flags(CREATE_NO_WINDOW).spawn() }
+    #[cfg(not(windows))]
+    { cmd.spawn() }
+}
 
 fn find_bin(candidates: &[&str]) -> String {
     for &b in candidates {
@@ -54,31 +65,27 @@ pub struct CompilePhase {
 pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<SpawnResult> {
     match runtime {
         "nodejs" | "typescript" => {
-            let child = Command::new("bun")
+            let child = spawn_no_window(Command::new("bun")
                 .args(["-e", code])
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
         }
         "python" => {
-            let child = Command::new(python())
+            let child = spawn_no_window(Command::new(python())
                 .args(["-c", code])
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
         }
         "powershell" => {
-            let child = Command::new(powershell())
+            let child = spawn_no_window(Command::new(powershell())
                 .args(["-NoProfile", "-NonInteractive", "-Command", code])
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
         }
         "cmd" => {
-            let child = Command::new("cmd.exe")
+            let child = spawn_no_window(Command::new("cmd.exe")
                 .args(["/c", code])
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
         }
         "bash" => {
@@ -95,29 +102,26 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
             } else {
                 vec![script.to_string_lossy().into()]
             };
-            let child = Command::new(cmd).args(&args)
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+            let child = spawn_no_window(Command::new(cmd).args(&args)
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
         "deno" => {
             let tmp = tempfile::tempdir()?;
             let file = tmp.path().join("code.ts");
             std::fs::write(&file, code)?;
-            let child = Command::new(deno())
+            let child = spawn_no_window(Command::new(deno())
                 .args(["run", "--no-check", &file.to_string_lossy()])
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
         "go" => {
             let tmp = tempfile::tempdir()?;
             let file = tmp.path().join("code.go");
             std::fs::write(&file, code)?;
-            let child = Command::new(go())
+            let child = spawn_no_window(Command::new(go())
                 .args(["run", &file.to_string_lossy()])
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
         "rust" | "c" | "cpp" => {
@@ -132,9 +136,8 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
                 "rust" => vec![file.to_string_lossy().into(), "-o".into(), bin_path.to_string_lossy().into()],
                 _ => vec![file.to_string_lossy().into(), "-o".into(), bin_path.to_string_lossy().into(), "-I".into(), cwd.to_string()],
             };
-            let child = Command::new(compiler).args(&args)
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+            let child = spawn_no_window(Command::new(compiler).args(&args)
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             let phase = CompilePhase { bin_path, runtime: runtime.to_string(), cp: None, class_name: None, cwd: cwd.to_string(), _tmpdir: tmp };
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: Some(phase) })
         }
@@ -150,10 +153,9 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
             std::fs::write(&file, &wrapped)?;
             let sep = if cfg!(windows) { ";" } else { ":" };
             let cp = format!("{}{}{}", tmp.path().to_string_lossy(), sep, cwd);
-            let child = Command::new(javac())
+            let child = spawn_no_window(Command::new(javac())
                 .args(["-cp", &cp, &file.to_string_lossy()])
-                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn()?;
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             let phase = CompilePhase { bin_path: PathBuf::new(), runtime: "java".to_string(), cp: Some(cp), class_name: Some(class_name.to_string()), cwd: cwd.to_string(), _tmpdir: tmp };
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: Some(phase) })
         }
