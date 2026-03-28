@@ -5,7 +5,7 @@ mod runner;
 mod rpc_client;
 
 use clap::{Parser, Subcommand};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{env, fs, path::PathBuf, time::Duration};
 
 const HARD_CEILING_MS: u64 = 15000;

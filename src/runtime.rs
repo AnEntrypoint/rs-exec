@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -49,14 +50,6 @@ pub struct CompilePhase {
     pub _tmpdir: TempDir,
 }
 
-fn opts(cwd: &str) -> Command {
-    let mut c = Command::new("_placeholder_");
-    c.current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    c
-}
 
 pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<SpawnResult> {
     match runtime {

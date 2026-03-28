@@ -1,7 +1,7 @@
 use axum::{extract::State, routing::{get, post}, Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, env, fs, path::PathBuf, process::{Command, Stdio}, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, env, fs, path::PathBuf, process::{ChildStdin, Command, Stdio}, sync::{Arc, Mutex}, time::Duration};
 use tokio::net::TcpListener;
 use rand::Rng;
 use crate::background_tasks::{BackgroundTaskStore, TaskResult, TaskStatus};
@@ -19,7 +19,7 @@ fn exec_process_bin() -> String {
 
 struct AppState {
     store: Arc<BackgroundTaskStore>,
-    active: Mutex<HashMap<u64, u32>>,
+    active: Mutex<HashMap<u64, (u32, Option<ChildStdin>)>>,
 }
 
 #[derive(Deserialize)]
@@ -29,12 +29,6 @@ struct RpcRequest {
     id: Option<Value>,
 }
 
-#[derive(Serialize)]
-struct RpcResponse {
-    id: Option<Value>,
-    result: Option<Value>,
-    error: Option<Value>,
-}
 
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
@@ -60,7 +54,7 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
             loop {
                 if tokio::time::Instant::now() >= deadline { break; }
-                let done = state.store.wait_for_output(task_id, 200).await;
+                let _done = state.store.wait_for_output(task_id, 200).await;
                 let status = state.store.get_task_status(task_id);
                 if let Some((s, _)) = &status {
                     if *s == TaskStatus::Completed || *s == TaskStatus::Failed { break; }
@@ -68,7 +62,8 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             }
             if let Some((s, result)) = state.store.get_task_status(task_id) {
                 if s == TaskStatus::Completed || s == TaskStatus::Failed {
-                    state.active.lock().unwrap().remove(&task_id);
+                    let entry = state.active.lock().unwrap().remove(&task_id);
+                    drop(entry);
                     state.store.delete_task(task_id);
                     let r = result.unwrap_or(TaskResult { success: false, stdout: String::new(), stderr: String::new(), error: Some("no result".into()), exit_code: 1 });
                     return Ok(json!({ "result": { "success": r.success, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "exitCode": r.exit_code, "backgroundTaskId": task_id, "completed": true } }));
@@ -116,7 +111,11 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         }
         "deleteTask" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
-            kill_process(state, id);
+            let entry = state.active.lock().unwrap().remove(&id);
+            if let Some((pid, stdin)) = entry {
+                drop(stdin);
+                kill_pid(pid);
+            }
             state.store.delete_task(id);
             Ok(json!({}))
         }
@@ -149,11 +148,18 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         "sendStdin" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
             let data = params["data"].as_str().unwrap_or("").to_string();
-            Ok(json!({ "ok": false }))
+            let mut active = state.active.lock().unwrap();
+            let ok = if let Some((_, Some(stdin))) = active.get_mut(&id) {
+                use std::io::Write;
+                stdin.write_all(data.as_bytes()).is_ok()
+            } else {
+                false
+            };
+            Ok(json!({ "ok": ok }))
         }
         "pm2list" => {
             let active = state.active.lock().unwrap();
-            let procs: Vec<Value> = active.iter().map(|(id, pid)| json!({ "name": format!("rs-exec-task-{}", id), "status": "online", "pid": pid })).collect();
+            let procs: Vec<Value> = active.iter().map(|(id, (pid, _))| json!({ "name": format!("rs-exec-task-{}", id), "status": "online", "pid": pid })).collect();
             Ok(json!({ "processes": procs }))
         }
         "shutdown" => {
@@ -175,26 +181,24 @@ async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, run
     env_vars.insert("RUNTIME".into(), runtime.to_string());
     env_vars.insert("CWD".into(), cwd.to_string());
     env_vars.insert("CODE_FILE".into(), code_file.to_string_lossy().to_string());
-    let child = Command::new(exec_process_bin())
+    let mut child = Command::new(exec_process_bin())
         .envs(&env_vars)
         .current_dir(cwd)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn()?;
     let pid = child.id();
-    state.active.lock().unwrap().insert(task_id, pid);
+    let stdin = child.stdin.take();
+    state.active.lock().unwrap().insert(task_id, (pid, stdin));
     state.store.start_task(task_id);
     std::mem::forget(child);
     Ok(())
 }
 
-fn kill_process(state: &Arc<AppState>, task_id: u64) {
-    let pid = state.active.lock().unwrap().remove(&task_id);
-    if let Some(pid) = pid {
-        if cfg!(windows) {
-            let _ = Command::new("taskkill").args(["/pid", &pid.to_string(), "/t", "/f"]).output();
-        } else {
-            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).output();
-        }
+fn kill_pid(pid: u32) {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+    if let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid)) {
+        proc.kill();
     }
 }
 
