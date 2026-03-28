@@ -54,7 +54,7 @@ pub fn start(name: &str, exe: &str, args: &[&str]) -> anyhow::Result<u32> {
             .stdout(out_f)
             .stderr(err_f)
             .stdin(Stdio::null())
-            .creation_flags(0x00000008)
+            .creation_flags(0x08000008)
             .spawn()?
     };
     #[cfg(not(windows))]
