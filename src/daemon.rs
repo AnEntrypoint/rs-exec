@@ -46,11 +46,14 @@ pub fn start(name: &str, exe: &str, args: &[&str]) -> anyhow::Result<u32> {
     let out_f = fs::File::create(log_file(name, "out"))?;
     let err_f = fs::File::create(log_file(name, "err"))?;
 
+    let path_env = std::env::var("PATH").unwrap_or_default();
+
     #[cfg(windows)]
     let child = {
         use std::os::windows::process::CommandExt;
         Command::new(exe)
             .args(args)
+            .env("PATH", &path_env)
             .stdout(out_f)
             .stderr(err_f)
             .stdin(Stdio::null())
@@ -61,6 +64,7 @@ pub fn start(name: &str, exe: &str, args: &[&str]) -> anyhow::Result<u32> {
     let child = {
         Command::new(exe)
             .args(args)
+            .env("PATH", &path_env)
             .stdout(out_f)
             .stderr(err_f)
             .stdin(Stdio::null())
