@@ -53,7 +53,15 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             spawn_exec_process(state, task_id, &code, &runtime, &cwd).await?;
             let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
             loop {
-                if tokio::time::Instant::now() >= deadline { break; }
+                if tokio::time::Instant::now() >= deadline {
+                    // Kill the child process so it doesn't run forever in the background
+                    let entry = state.active.lock().unwrap().remove(&task_id);
+                    if let Some((pid, stdin)) = entry {
+                        drop(stdin);
+                        kill_pid(pid);
+                    }
+                    break;
+                }
                 let _done = state.store.wait_for_output(task_id, 200).await;
                 let status = state.store.get_task_status(task_id);
                 if let Some((s, _)) = &status {
