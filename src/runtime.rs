@@ -106,6 +106,12 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
+        "browser" => {
+            let child = spawn_no_window(Command::new("playwriter")
+                .args(["-s", "1", "-e", code])
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+            Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
+        }
         "deno" => {
             let tmp = tempfile::tempdir()?;
             let file = tmp.path().join("code.ts");
