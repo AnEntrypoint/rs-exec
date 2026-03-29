@@ -10,11 +10,8 @@ fn port_file() -> PathBuf {
     env::temp_dir().join("glootie-runner.port")
 }
 
-fn exec_process_bin() -> String {
-    let exe = env::current_exe().unwrap_or_default();
-    let dir = exe.parent().unwrap_or_else(|| std::path::Path::new("."));
-    dir.join(if cfg!(windows) { "rs-exec-process.exe" } else { "rs-exec-process" })
-        .to_string_lossy().to_string()
+fn self_exe() -> String {
+    env::current_exe().unwrap_or_default().to_string_lossy().to_string()
 }
 
 pub struct AppState {
@@ -186,7 +183,8 @@ async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, run
     #[cfg(windows)]
     let mut child = {
         use std::os::windows::process::CommandExt;
-        Command::new(exec_process_bin())
+        Command::new(self_exe())
+            .arg("--exec-process-mode")
             .envs(&env_vars)
             .current_dir(cwd)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -194,7 +192,8 @@ async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, run
             .spawn()?
     };
     #[cfg(not(windows))]
-    let mut child = Command::new(exec_process_bin())
+    let mut child = Command::new(self_exe())
+        .arg("--exec-process-mode")
         .envs(&env_vars)
         .current_dir(cwd)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
