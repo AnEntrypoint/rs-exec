@@ -228,59 +228,63 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
             }
         }
     }
-    let chrome = find_chrome();
-    if let Some(ref chrome_path) = chrome {
-        let user_data = std::env::temp_dir().join("playwriter-chrome-profile");
-        let _ = spawn_no_window(Command::new(chrome_path)
-            .args(["--remote-debugging-port=9222", "--no-first-run", "--no-default-browser-check",
-                   &format!("--user-data-dir={}", user_data.to_string_lossy())])
-            .stdout(Stdio::null()).stderr(Stdio::null()));
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let mut retry_args: Vec<String> = prefix.to_vec();
-            retry_args.extend(["session".into(), "new".into(), "--direct".into()]);
-            if let Ok(out) = Command::new(bin).args(&retry_args).current_dir(cwd)
+    let launcher_js = r#"
+const {getBrowserExecutableCandidates}=require('./dist/browser-config.js');
+const {getBrowserLaunchArgs,getDefaultBrowserUserDataDir}=require('./dist/browser-launch.js');
+const {spawn}=require('child_process');
+const path=require('path');
+const fs=require('fs');
+const candidates=getBrowserExecutableCandidates();
+const browserPath=candidates.find(p=>fs.existsSync(p));
+if(!browserPath){process.stderr.write('No browser found');process.exit(1)}
+const extPath=path.join(path.dirname(require.resolve('playwriter/package.json')),'dist','extension','chromium');
+const userDataDir=getDefaultBrowserUserDataDir()+'-direct';
+const args=getBrowserLaunchArgs({extensionPath:extPath,userDataDir,headless:false});
+args.splice(args.length-1,0,'--remote-debugging-port=9222');
+fs.mkdirSync(path.resolve(userDataDir),{recursive:true});
+const p=spawn(browserPath,args,{detached:true,stdio:'ignore'});
+p.unref();
+process.stdout.write(String(p.pid||''));
+"#;
+    let pw_pkg = if bin == "node" && !prefix.is_empty() {
+        std::path::Path::new(&prefix[0]).parent().and_then(|p| p.parent()).map(|p| p.to_path_buf())
+    } else {
+        which::which("playwriter").ok().and_then(|p| p.parent().map(|d| d.join("node_modules").join("playwriter")))
+    };
+    if let Some(ref pkg_dir) = pw_pkg {
+        if pkg_dir.join("dist").join("browser-launch.js").exists() {
+            let launcher_file = std::env::temp_dir().join("playwriter-launcher.cjs");
+            let _ = std::fs::write(&launcher_file, launcher_js);
+            if let Ok(out) = Command::new("node")
+                .args(["-e", &format!("process.chdir({});{}",
+                    serde_json::to_string(&pkg_dir.to_string_lossy().to_string()).unwrap_or_default(),
+                    launcher_js)])
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
             {
-                let s = String::from_utf8_lossy(&out.stdout);
-                for line in s.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
-                        return trimmed.to_string();
+                let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !pid.is_empty() {
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let mut retry_args: Vec<String> = prefix.to_vec();
+                        retry_args.extend(["session".into(), "new".into(), "--direct".into()]);
+                        if let Ok(out) = Command::new(bin).args(&retry_args).current_dir(cwd)
+                            .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+                        {
+                            let s = String::from_utf8_lossy(&out.stdout);
+                            for line in s.lines() {
+                                let trimmed = line.trim();
+                                if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
+                                    let _ = std::fs::remove_file(&launcher_file);
+                                    return trimmed.to_string();
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
     "1".to_string()
-}
-
-fn find_chrome() -> Option<String> {
-    let candidates = if cfg!(windows) {
-        let pf = std::env::var("ProgramFiles").unwrap_or_default();
-        let pf86 = std::env::var("ProgramFiles(x86)").unwrap_or_default();
-        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        vec![
-            format!("{}/Google/Chrome/Application/chrome.exe", pf),
-            format!("{}/Google/Chrome/Application/chrome.exe", pf86),
-            format!("{}/Google/Chrome/Application/chrome.exe", local),
-            format!("{}/Google/Chrome for Testing/Application/chrome.exe", pf),
-            format!("{}/BraveSoftware/Brave-Browser/Application/brave.exe", pf),
-            format!("{}/Microsoft/Edge/Application/msedge.exe", pf),
-        ]
-    } else if cfg!(target_os = "macos") {
-        vec![
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
-            "/Applications/Chromium.app/Contents/MacOS/Chromium".into(),
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser".into(),
-        ]
-    } else {
-        vec![
-            "google-chrome".into(), "google-chrome-stable".into(),
-            "chromium".into(), "chromium-browser".into(),
-        ]
-    };
-    candidates.into_iter().find(|p| std::path::Path::new(p).exists())
 }
 
 pub fn kill_child(child: &mut Child) {
