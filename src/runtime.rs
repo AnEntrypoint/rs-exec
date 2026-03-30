@@ -241,11 +241,15 @@ if(!browserPath){process.stderr.write('No browser found');process.exit(1)}
 const extPath=path.join(path.dirname(require.resolve('playwriter/package.json')),'dist','extension','chromium');
 const userDataDir=getDefaultBrowserUserDataDir()+'-direct';
 const args=getBrowserLaunchArgs({extensionPath:extPath,userDataDir,headless:false});
-args.splice(args.length-1,0,'--remote-debugging-port=9222');
+const net=require('net');
+function findPort(start){return new Promise((res,rej)=>{const s=net.createServer();s.listen(start,'127.0.0.1',()=>{s.close(()=>res(start))});s.on('error',()=>start<9300?res(findPort(start+1)):rej(new Error('no free port')))})}
+findPort(9222).then(port=>{
+args.splice(args.length-1,0,'--remote-debugging-port='+port);
 fs.mkdirSync(path.resolve(userDataDir),{recursive:true});
 const p=spawn(browserPath,args,{detached:true,stdio:'ignore'});
 p.unref();
-process.stdout.write(String(p.pid||''));
+process.stdout.write(port+'|'+String(p.pid||''));
+});
 "#;
     let pw_pkg = if bin == "node" && !prefix.is_empty() {
         std::path::Path::new(&prefix[0]).parent().and_then(|p| p.parent()).map(|p| p.to_path_buf())
@@ -262,12 +266,14 @@ process.stdout.write(String(p.pid||''));
                     launcher_js)])
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
             {
-                let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !pid.is_empty() {
+                let launch_out = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !launch_out.is_empty() {
+                    let port = launch_out.split('|').next().unwrap_or("9222");
+                    let direct_arg = format!("--direct=localhost:{}", port);
                     for _ in 0..20 {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         let mut retry_args: Vec<String> = prefix.to_vec();
-                        retry_args.extend(["session".into(), "new".into(), "--direct".into()]);
+                        retry_args.extend(["session".into(), "new".into(), direct_arg.clone()]);
                         if let Ok(out) = Command::new(bin).args(&retry_args).current_dir(cwd)
                             .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
                         {
