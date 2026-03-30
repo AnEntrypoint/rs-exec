@@ -110,9 +110,17 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
         }
         "browser" => {
             let pw = playwriter();
-            let session_id = get_or_create_browser_session(pw, cwd);
+            let trimmed = code.trim();
+            let args: Vec<String> = if trimmed.starts_with("playwriter ") {
+                trimmed.strip_prefix("playwriter ").unwrap().split_whitespace().map(|s| s.to_string()).collect()
+            } else if trimmed.starts_with("session ") || trimmed == "session" {
+                trimmed.split_whitespace().map(|s| s.to_string()).collect()
+            } else {
+                let session_id = get_or_create_browser_session(pw, cwd);
+                vec!["-s".into(), session_id, "-e".into(), code.to_string()]
+            };
             let child = spawn_no_window(Command::new(pw)
-                .args(["-s", &session_id, "-e", code])
+                .args(&args)
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
         }
