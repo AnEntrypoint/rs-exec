@@ -35,6 +35,7 @@ pub struct Task {
     pub output_log: Vec<OutputEntry>,
     pub created_at: Instant,
     pub completed_at: Option<Instant>,
+    pub session_id: Option<String>,
 }
 
 pub struct BackgroundTaskStore {
@@ -64,8 +65,30 @@ impl BackgroundTaskStore {
             output_log: vec![],
             created_at: Instant::now(),
             completed_at: None,
+            session_id: None,
         });
         id
+    }
+
+    pub fn set_session_id(&self, id: u64, session_id: &str) {
+        let mut tasks = self.tasks.lock().unwrap();
+        if let Some(t) = tasks.get_mut(&id) {
+            t.session_id = Some(session_id.to_string());
+        }
+    }
+
+    pub fn delete_session_tasks(&self, session_id: &str) -> u64 {
+        let mut tasks = self.tasks.lock().unwrap();
+        let ids: Vec<u64> = tasks.values()
+            .filter(|t| t.session_id.as_deref() == Some(session_id))
+            .map(|t| t.id)
+            .collect();
+        let count = ids.len() as u64;
+        for id in &ids { tasks.remove(id); }
+        drop(tasks);
+        let mut notifiers = self.notifiers.lock().unwrap();
+        for id in &ids { notifiers.remove(id); }
+        count
     }
 
     pub fn start_task(&self, id: u64) {

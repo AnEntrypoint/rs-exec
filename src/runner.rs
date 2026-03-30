@@ -47,6 +47,9 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();
             let timeout = params["timeout"].as_u64().unwrap_or(15000);
             let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
+            if let Some(sid) = params["sessionId"].as_str() {
+                state.store.set_session_id(task_id, sid);
+            }
             spawn_exec_process(state, task_id, &code, &runtime, &cwd).await?;
             let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
             loop {
@@ -72,7 +75,15 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         }
         "createTask" => {
             let id = state.store.create_task();
+            if let Some(sid) = params["sessionId"].as_str() {
+                state.store.set_session_id(id, sid);
+            }
             Ok(json!({ "taskId": id }))
+        }
+        "deleteSessionTasks" => {
+            let sid = params["sessionId"].as_str().unwrap_or("");
+            let count = state.store.delete_session_tasks(sid);
+            Ok(json!({ "deleted": count }))
         }
         "startTask" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
