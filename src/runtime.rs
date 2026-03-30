@@ -235,7 +235,8 @@ const {spawn}=require('child_process');
 const path=require('path');
 const fs=require('fs');
 const candidates=getBrowserExecutableCandidates();
-const browserPath=candidates.find(p=>fs.existsSync(p));
+const fallbacks=process.platform==='win32'?[process.env.ProgramFiles+'\\Google\\Chrome\\Application\\chrome.exe',process.env['ProgramFiles(x86)']+'\\Google\\Chrome\\Application\\chrome.exe',(process.env.LOCALAPPDATA||'')+'\\Google\\Chrome\\Application\\chrome.exe',process.env.ProgramFiles+'\\Microsoft\\Edge\\Application\\msedge.exe']:process.platform==='darwin'?['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']:['google-chrome','google-chrome-stable'].map(n=>{try{return require('child_process').execSync('which '+n,{encoding:'utf8'}).trim()}catch{return''}}).filter(Boolean);
+const browserPath=[...candidates,...fallbacks].find(p=>p&&fs.existsSync(p));
 if(!browserPath){process.stderr.write('No browser found');process.exit(1)}
 const extPath=path.join(path.dirname(require.resolve('playwriter/package.json')),'dist','extension','chromium');
 const userDataDir=getDefaultBrowserUserDataDir()+'-direct';
