@@ -46,7 +46,17 @@ fn gpp() -> &'static str { GPP.get_or_init(|| find_bin(&["g++"])) }
 fn java() -> &'static str { JAVA.get_or_init(|| find_bin(&["java"])) }
 fn javac() -> &'static str { JAVAC.get_or_init(|| find_bin(&["javac"])) }
 fn powershell() -> &'static str { POWERSHELL.get_or_init(|| find_bin(&["pwsh", "powershell"])) }
-fn playwriter() -> &'static str { PLAYWRITER.get_or_init(|| find_bin(&["playwriter"])) }
+fn playwriter() -> &'static str {
+    PLAYWRITER.get_or_init(|| {
+        if let Ok(p) = which::which("playwriter") {
+            let dir = p.parent().unwrap_or(std::path::Path::new("."));
+            let bin_js = dir.join("node_modules").join("playwriter").join("bin.js");
+            if bin_js.exists() { return bin_js.to_string_lossy().to_string(); }
+            return p.to_string_lossy().to_string();
+        }
+        "playwriter".to_string()
+    })
+}
 
 pub struct SpawnResult {
     pub child: Child,
@@ -110,16 +120,22 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
         }
         "browser" => {
             let pw = playwriter();
-            let trimmed = code.trim();
-            let args: Vec<String> = if trimmed.starts_with("playwriter ") {
-                trimmed.strip_prefix("playwriter ").unwrap().split_whitespace().map(|s| s.to_string()).collect()
-            } else if trimmed.starts_with("session ") || trimmed == "session" {
-                trimmed.split_whitespace().map(|s| s.to_string()).collect()
+            let (bin, prefix): (&str, Vec<String>) = if pw.ends_with(".js") {
+                ("node", vec![pw.to_string()])
             } else {
-                let session_id = get_or_create_browser_session(pw, cwd);
-                vec!["-s".into(), session_id, "-e".into(), code.to_string()]
+                (pw, vec![])
             };
-            let child = spawn_no_window(Command::new(pw)
+            let trimmed = code.trim();
+            let mut args = prefix;
+            if trimmed.starts_with("playwriter ") {
+                args.extend(trimmed.strip_prefix("playwriter ").unwrap().split_whitespace().map(|s| s.to_string()));
+            } else if trimmed.starts_with("session ") || trimmed == "session" {
+                args.extend(trimmed.split_whitespace().map(|s| s.to_string()));
+            } else {
+                let session_id = get_or_create_browser_session(bin, &args, cwd);
+                args.extend(["-s".into(), session_id, "-e".into(), code.to_string()]);
+            };
+            let child = spawn_no_window(Command::new(bin)
                 .args(&args)
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
@@ -181,8 +197,10 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
     }
 }
 
-fn get_or_create_browser_session(pw: &str, cwd: &str) -> String {
-    if let Ok(out) = Command::new(pw).args(["session", "list"]).current_dir(cwd)
+fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> String {
+    let mut list_args: Vec<String> = prefix.to_vec();
+    list_args.extend(["session".into(), "list".into()]);
+    if let Ok(out) = Command::new(bin).args(&list_args).current_dir(cwd)
         .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     {
         let list = String::from_utf8_lossy(&out.stdout);
@@ -197,7 +215,9 @@ fn get_or_create_browser_session(pw: &str, cwd: &str) -> String {
             }
         }
     }
-    if let Ok(out) = Command::new(pw).args(["session", "new"]).current_dir(cwd)
+    let mut new_args: Vec<String> = prefix.to_vec();
+    new_args.extend(["session".into(), "new".into()]);
+    if let Ok(out) = Command::new(bin).args(&new_args).current_dir(cwd)
         .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     {
         let s = String::from_utf8_lossy(&out.stdout);
