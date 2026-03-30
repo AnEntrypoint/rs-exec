@@ -228,11 +228,13 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
             }
         }
     }
-    let mut start_args: Vec<String> = prefix.to_vec();
-    start_args.extend(["browser".into(), "start".into()]);
-    if let Ok(mut child) = Command::new(bin).args(&start_args).current_dir(cwd)
-        .stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-    {
+    let chrome = find_chrome();
+    if let Some(ref chrome_path) = chrome {
+        let user_data = std::env::temp_dir().join("playwriter-chrome-profile");
+        let _ = spawn_no_window(Command::new(chrome_path)
+            .args(["--remote-debugging-port=9222", "--no-first-run", "--no-default-browser-check",
+                   &format!("--user-data-dir={}", user_data.to_string_lossy())])
+            .stdout(Stdio::null()).stderr(Stdio::null()));
         for _ in 0..20 {
             std::thread::sleep(std::time::Duration::from_millis(500));
             let mut retry_args: Vec<String> = prefix.to_vec();
@@ -249,9 +251,36 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
                 }
             }
         }
-        let _ = child.kill();
     }
     "1".to_string()
+}
+
+fn find_chrome() -> Option<String> {
+    let candidates = if cfg!(windows) {
+        let pf = std::env::var("ProgramFiles").unwrap_or_default();
+        let pf86 = std::env::var("ProgramFiles(x86)").unwrap_or_default();
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        vec![
+            format!("{}/Google/Chrome/Application/chrome.exe", pf),
+            format!("{}/Google/Chrome/Application/chrome.exe", pf86),
+            format!("{}/Google/Chrome/Application/chrome.exe", local),
+            format!("{}/Google/Chrome for Testing/Application/chrome.exe", pf),
+            format!("{}/BraveSoftware/Brave-Browser/Application/brave.exe", pf),
+            format!("{}/Microsoft/Edge/Application/msedge.exe", pf),
+        ]
+    } else if cfg!(target_os = "macos") {
+        vec![
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
+            "/Applications/Chromium.app/Contents/MacOS/Chromium".into(),
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser".into(),
+        ]
+    } else {
+        vec![
+            "google-chrome".into(), "google-chrome-stable".into(),
+            "chromium".into(), "chromium-browser".into(),
+        ]
+    };
+    candidates.into_iter().find(|p| std::path::Path::new(p).exists())
 }
 
 pub fn kill_child(child: &mut Child) {
