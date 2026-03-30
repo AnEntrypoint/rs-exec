@@ -109,8 +109,10 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
         "browser" => {
-            let child = spawn_no_window(Command::new(playwriter())
-                .args(["-s", "1", "-e", code])
+            let pw = playwriter();
+            let session_id = get_or_create_browser_session(pw, cwd);
+            let child = spawn_no_window(Command::new(pw)
+                .args(["-s", &session_id, "-e", code])
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
         }
@@ -169,6 +171,36 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
         }
         _ => Err(anyhow::anyhow!("Unsupported runtime: {}", runtime))
     }
+}
+
+fn get_or_create_browser_session(pw: &str, cwd: &str) -> String {
+    if let Ok(out) = Command::new(pw).args(["session", "list"]).current_dir(cwd)
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    {
+        let list = String::from_utf8_lossy(&out.stdout);
+        for line in list.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                if let Some(id) = trimmed.split_whitespace().next() {
+                    if id.chars().all(|c| c.is_ascii_digit()) {
+                        return id.to_string();
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(out) = Command::new(pw).args(["session", "new"]).current_dir(cwd)
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            let trimmed = line.trim();
+            if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    "1".to_string()
 }
 
 pub fn kill_child(child: &mut Child) {
