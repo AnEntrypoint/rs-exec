@@ -216,7 +216,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
         }
     }
     let mut new_args: Vec<String> = prefix.to_vec();
-    new_args.extend(["session".into(), "new".into()]);
+    new_args.extend(["session".into(), "new".into(), "--direct".into()]);
     if let Ok(out) = Command::new(bin).args(&new_args).current_dir(cwd)
         .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
     {
