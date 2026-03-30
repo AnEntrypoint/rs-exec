@@ -257,7 +257,7 @@ p.unref();
 process.stdout.write(process.env._CDP_PORT+'|'+String(p.pid||''));
 "#;
     let pw_pkg = if bin == "node" && !prefix.is_empty() {
-        std::path::Path::new(&prefix[0]).parent().and_then(|p| p.parent()).map(|p| p.to_path_buf())
+        std::path::Path::new(&prefix[0]).parent().map(|p| p.to_path_buf())
     } else {
         which::which("playwriter").ok().and_then(|p| p.parent().map(|d| d.join("node_modules").join("playwriter")))
     };
