@@ -228,6 +228,29 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
             }
         }
     }
+    let mut start_args: Vec<String> = prefix.to_vec();
+    start_args.extend(["browser".into(), "start".into()]);
+    if let Ok(mut child) = Command::new(bin).args(&start_args).current_dir(cwd)
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    {
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let mut retry_args: Vec<String> = prefix.to_vec();
+            retry_args.extend(["session".into(), "new".into(), "--direct".into()]);
+            if let Ok(out) = Command::new(bin).args(&retry_args).current_dir(cwd)
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+            {
+                let s = String::from_utf8_lossy(&out.stdout);
+                for line in s.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
+                        return trimmed.to_string();
+                    }
+                }
+            }
+        }
+        let _ = child.kill();
+    }
     "1".to_string()
 }
 
