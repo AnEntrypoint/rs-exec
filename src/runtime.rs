@@ -197,6 +197,15 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
     }
 }
 
+fn find_free_port(start: u16) -> u16 {
+    for port in start..start + 100 {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    start
+}
+
 fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> String {
     let mut list_args: Vec<String> = prefix.to_vec();
     list_args.extend(["session".into(), "list".into()]);
@@ -241,15 +250,11 @@ if(!browserPath){process.stderr.write('No browser found');process.exit(1)}
 const extPath=path.join(path.dirname(require.resolve('playwriter/package.json')),'dist','extension','chromium');
 const userDataDir=getDefaultBrowserUserDataDir()+'-direct';
 const args=getBrowserLaunchArgs({extensionPath:extPath,userDataDir,headless:false});
-const net=require('net');
-function findPort(start){return new Promise((res,rej)=>{const s=net.createServer();s.listen(start,'127.0.0.1',()=>{s.close(()=>res(start))});s.on('error',()=>start<9300?res(findPort(start+1)):rej(new Error('no free port')))})}
-findPort(9222).then(port=>{
-args.splice(args.length-1,0,'--remote-debugging-port='+port);
+args.splice(args.length-1,0,'--remote-debugging-port='+process.env._CDP_PORT);
 fs.mkdirSync(path.resolve(userDataDir),{recursive:true});
 const p=spawn(browserPath,args,{detached:true,stdio:'ignore'});
 p.unref();
-process.stdout.write(port+'|'+String(p.pid||''));
-});
+process.stdout.write(process.env._CDP_PORT+'|'+String(p.pid||''));
 "#;
     let pw_pkg = if bin == "node" && !prefix.is_empty() {
         std::path::Path::new(&prefix[0]).parent().and_then(|p| p.parent()).map(|p| p.to_path_buf())
@@ -260,10 +265,12 @@ process.stdout.write(port+'|'+String(p.pid||''));
         if pkg_dir.join("dist").join("browser-launch.js").exists() {
             let launcher_file = std::env::temp_dir().join("playwriter-launcher.cjs");
             let _ = std::fs::write(&launcher_file, launcher_js);
+            let cdp_port = find_free_port(9222);
             if let Ok(out) = Command::new("node")
                 .args(["-e", &format!("process.chdir({});{}",
                     serde_json::to_string(&pkg_dir.to_string_lossy().to_string()).unwrap_or_default(),
                     launcher_js)])
+                .env("_CDP_PORT", cdp_port.to_string())
                 .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
             {
                 let launch_out = String::from_utf8_lossy(&out.stdout).trim().to_string();
