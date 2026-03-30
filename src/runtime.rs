@@ -17,8 +17,8 @@ fn spawn_no_window(cmd: &mut Command) -> std::io::Result<Child> {
 
 fn find_bin(candidates: &[&str]) -> String {
     for &b in candidates {
-        if which::which(b).is_ok() {
-            return b.to_string();
+        if let Ok(path) = which::which(b) {
+            return path.to_string_lossy().to_string();
         }
     }
     candidates[0].to_string()
