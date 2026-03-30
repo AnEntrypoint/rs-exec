@@ -34,6 +34,7 @@ static GPP: OnceLock<String> = OnceLock::new();
 static JAVA: OnceLock<String> = OnceLock::new();
 static JAVAC: OnceLock<String> = OnceLock::new();
 static POWERSHELL: OnceLock<String> = OnceLock::new();
+static PLAYWRITER: OnceLock<String> = OnceLock::new();
 
 fn python() -> &'static str { PYTHON.get_or_init(|| find_bin(&["python3", "python"])) }
 fn bash() -> &'static str { BASH.get_or_init(|| find_bin(&["bash", "sh"])) }
@@ -45,6 +46,7 @@ fn gpp() -> &'static str { GPP.get_or_init(|| find_bin(&["g++"])) }
 fn java() -> &'static str { JAVA.get_or_init(|| find_bin(&["java"])) }
 fn javac() -> &'static str { JAVAC.get_or_init(|| find_bin(&["javac"])) }
 fn powershell() -> &'static str { POWERSHELL.get_or_init(|| find_bin(&["pwsh", "powershell"])) }
+fn playwriter() -> &'static str { PLAYWRITER.get_or_init(|| find_bin(&["playwriter"])) }
 
 pub struct SpawnResult {
     pub child: Child,
@@ -107,7 +109,7 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
         "browser" => {
-            let child = spawn_no_window(Command::new("playwriter")
+            let child = spawn_no_window(Command::new(playwriter())
                 .args(["-s", "1", "-e", code])
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
