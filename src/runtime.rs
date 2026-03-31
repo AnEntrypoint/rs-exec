@@ -240,7 +240,6 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
     let launcher_js = r#"
 const d=process.cwd();
 const {getBrowserExecutableCandidates}=require(d+'/dist/browser-config.js');
-const {getBrowserLaunchArgs,getDefaultBrowserUserDataDir}=require(d+'/dist/browser-launch.js');
 const {spawn}=require('child_process');
 const path=require('path');
 const fs=require('fs');
@@ -248,14 +247,12 @@ const candidates=getBrowserExecutableCandidates();
 const fallbacks=process.platform==='win32'?[process.env.ProgramFiles+'\\Google\\Chrome\\Application\\chrome.exe',process.env['ProgramFiles(x86)']+'\\Google\\Chrome\\Application\\chrome.exe',(process.env.LOCALAPPDATA||'')+'\\Google\\Chrome\\Application\\chrome.exe',process.env.ProgramFiles+'\\Microsoft\\Edge\\Application\\msedge.exe']:process.platform==='darwin'?['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']:['google-chrome','google-chrome-stable'].map(n=>{try{return require('child_process').execSync('which '+n,{encoding:'utf8'}).trim()}catch{return''}}).filter(Boolean);
 const browserPath=[...candidates,...fallbacks].find(p=>p&&fs.existsSync(p));
 if(!browserPath){process.stderr.write('No browser found');process.exit(1)}
-const extPath=path.join(d,'dist','extension','chromium');
-const userDataDir=getDefaultBrowserUserDataDir()+'-direct';
-const args=getBrowserLaunchArgs({extensionPath:extPath,userDataDir,headless:false});
-args.splice(args.length-1,0,'--remote-debugging-port='+process.env._CDP_PORT);
-fs.mkdirSync(path.resolve(userDataDir),{recursive:true});
-const p=spawn(browserPath,args,{detached:true,stdio:'ignore'});
+const port=process.env._CDP_PORT;
+const userDataDir=path.join(process.env.LOCALAPPDATA||process.env.HOME||'/tmp','Google','Chrome-PlugkitDebug');
+fs.mkdirSync(userDataDir,{recursive:true});
+const p=spawn(browserPath,['--remote-debugging-port='+port,'--user-data-dir='+userDataDir,'--no-first-run','--no-default-browser-check'],{detached:true,stdio:'ignore'});
 p.unref();
-process.stdout.write(process.env._CDP_PORT+'|'+String(p.pid||''));
+process.stdout.write(port+'|'+String(p.pid||''));
 "#;
     let pw_pkg = if bin == "node" && !prefix.is_empty() {
         std::path::Path::new(&prefix[0]).parent().map(|p| p.to_path_buf())
