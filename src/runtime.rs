@@ -158,19 +158,72 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
-        "rust" | "c" | "cpp" => {
+        "rust" => {
+            let cargo_deps: Vec<(String, String)> = code.lines()
+                .filter_map(|l| l.trim().strip_prefix("// cargo-dep:"))
+                .filter_map(|dep| {
+                    let parts: Vec<&str> = dep.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        Some((parts[0].trim().to_string(), parts[1].trim().trim_matches('"').to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let cargo_paths: Vec<(String, String)> = code.lines()
+                .filter_map(|l| l.trim().strip_prefix("// cargo-path:"))
+                .filter_map(|dep| {
+                    let parts: Vec<&str> = dep.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        Some((parts[0].trim().to_string(), parts[1].trim().trim_matches('"').to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if cargo_deps.is_empty() && cargo_paths.is_empty() {
+                let tmp = tempfile::tempdir()?;
+                let file = tmp.path().join("code.rs");
+                std::fs::write(&file, code)?;
+                let bin_ext = if cfg!(windows) { ".exe" } else { "" };
+                let bin_path = tmp.path().join(format!("code{}", bin_ext));
+                let child = spawn_no_window(Command::new(rustc())
+                    .args([file.to_string_lossy().as_ref(), "-o", bin_path.to_string_lossy().as_ref()])
+                    .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+                let phase = CompilePhase { bin_path, runtime: "rust".to_string(), cp: None, class_name: None, cwd: cwd.to_string(), _tmpdir: tmp };
+                return Ok(SpawnResult { child, _tmpdir: None, compile_phase: Some(phase) });
+            }
             let tmp = tempfile::tempdir()?;
-            let ext = match runtime { "rust" => ".rs", "c" => ".c", _ => ".cpp" };
+            let src_dir = tmp.path().join("src");
+            std::fs::create_dir_all(&src_dir)?;
+            std::fs::write(src_dir.join("main.rs"), code)?;
+            let mut dep_lines = String::new();
+            for (name, version) in &cargo_deps {
+                dep_lines.push_str(&format!("{} = \"{}\"\n", name, version));
+            }
+            for (name, path) in &cargo_paths {
+                dep_lines.push_str(&format!("{} = {{ path = \"{}\" }}\n", name, path));
+            }
+            let cargo_toml = format!(
+                "[package]\nname = \"exec-rust\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{}",
+                dep_lines
+            );
+            std::fs::write(tmp.path().join("Cargo.toml"), &cargo_toml)?;
+            let child = spawn_no_window(Command::new("cargo")
+                .args(["run", "--manifest-path", &tmp.path().join("Cargo.toml").to_string_lossy()])
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+            Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
+        }
+        "c" | "cpp" => {
+            let tmp = tempfile::tempdir()?;
+            let ext = if runtime == "c" { ".c" } else { ".cpp" };
             let file = tmp.path().join(format!("code{}", ext));
             std::fs::write(&file, code)?;
             let bin_ext = if cfg!(windows) { ".exe" } else { "" };
             let bin_path = tmp.path().join(format!("code{}", bin_ext));
-            let compiler = match runtime { "rust" => rustc(), "c" => gcc(), _ => gpp() };
-            let args: Vec<String> = match runtime {
-                "rust" => vec![file.to_string_lossy().into(), "-o".into(), bin_path.to_string_lossy().into()],
-                _ => vec![file.to_string_lossy().into(), "-o".into(), bin_path.to_string_lossy().into(), "-I".into(), cwd.to_string()],
-            };
-            let child = spawn_no_window(Command::new(compiler).args(&args)
+            let compiler = if runtime == "c" { gcc() } else { gpp() };
+            let child = spawn_no_window(Command::new(compiler)
+                .args([file.to_string_lossy().as_ref(), "-o", bin_path.to_string_lossy().as_ref(), "-I", cwd])
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             let phase = CompilePhase { bin_path, runtime: runtime.to_string(), cp: None, class_name: None, cwd: cwd.to_string(), _tmpdir: tmp };
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: Some(phase) })
