@@ -132,7 +132,8 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
             } else if trimmed.starts_with("session ") || trimmed == "session" {
                 args.extend(trimmed.split_whitespace().map(|s| s.to_string()));
             } else {
-                let pw_session = get_or_create_browser_session(bin, &args, cwd, session_id);
+                let pw_session = get_or_create_browser_session(bin, &args, cwd, session_id)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
                 args.extend(["-s".into(), pw_session, "-e".into(), code.to_string()]);
             };
             let child = spawn_no_window(Command::new(bin)
@@ -288,7 +289,133 @@ fn get_registered_sessions(claude_session_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude_session_id: &str) -> String {
+fn managed_browser_dir() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    PathBuf::from(base).join("plugkit").join("chrome-portable")
+}
+
+fn managed_browser_exe() -> Option<PathBuf> {
+    let dir = managed_browser_dir();
+    let candidates = [
+        dir.join("GoogleChromePortable").join("App").join("Chrome-bin").join("chrome.exe"),
+        dir.join("GoogleChromePortable").join("App").join("Chrome").join("chrome"),
+        dir.join("chrome").join("chrome"),
+        dir.join("chrome"),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn managed_browser_user_data() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    PathBuf::from(base).join("plugkit").join("chrome-profile")
+}
+
+fn ensure_managed_browser() -> Result<PathBuf, String> {
+    if let Some(exe) = managed_browser_exe() {
+        return Ok(exe);
+    }
+    eprintln!("[browser] Managed browser not found. Installing Chrome Portable...");
+    let install_dir = managed_browser_dir();
+    std::fs::create_dir_all(&install_dir)
+        .map_err(|e| format!("Failed to create install dir: {}", e))?;
+
+    let installer_url = "https://sourceforge.net/projects/portableapps/files/Google%20Chrome%20Portable/GoogleChromePortable_latest.paf.exe/download";
+    let installer_path = install_dir.join("GoogleChromePortable_installer.exe");
+
+    eprintln!("[browser] Downloading Chrome Portable installer...");
+    let dl_result = Command::new("powershell")
+        .args([
+            "-NoProfile", "-NonInteractive", "-Command",
+            &format!(
+                "Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
+                installer_url,
+                installer_path.display()
+            ),
+        ])
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+
+    match dl_result {
+        Ok(out) if out.status.success() => {
+            eprintln!("[browser] Download complete. Running silent installer...");
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("Chrome Portable download failed: {}", err));
+        }
+        Err(e) => return Err(format!("Failed to run downloader: {}", e)),
+    }
+
+    let install_result = Command::new(&installer_path)
+        .args([
+            &format!("/DESTINATION={}", install_dir.display()),
+            "/SILENT",
+        ])
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+
+    match install_result {
+        Ok(out) if out.status.success() => {
+            eprintln!("[browser] Chrome Portable installed.");
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("Chrome Portable installer failed: {}", err));
+        }
+        Err(e) => return Err(format!("Failed to run installer: {}", e)),
+    }
+
+    managed_browser_exe().ok_or_else(|| format!(
+        "Chrome Portable installed but executable not found in {}. Check install logs.",
+        install_dir.display()
+    ))
+}
+
+fn launch_managed_browser(exe: &PathBuf, port: u16) -> Result<(), String> {
+    let user_data = managed_browser_user_data();
+    std::fs::create_dir_all(&user_data)
+        .map_err(|e| format!("Failed to create browser profile dir: {}", e))?;
+    eprintln!("[browser] Launching managed browser on port {}...", port);
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        &format!("--remote-debugging-port={}", port),
+        &format!("--user-data-dir={}", user_data.display()),
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--headless=new",
+    ]);
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _child = cmd.spawn().map_err(|e| format!("Failed to launch browser: {}", e))?;
+    Ok(())
+}
+
+fn try_new_session(bin: &str, prefix: &[String], cwd: &str, direct_arg: Option<&str>) -> Option<String> {
+    let mut args: Vec<String> = prefix.to_vec();
+    args.extend(["session".into(), "new".into()]);
+    match direct_arg {
+        Some(d) => args.push(d.to_string()),
+        None => args.push("--direct".into()),
+    }
+    if let Ok(out) = Command::new(bin).args(&args).current_dir(cwd)
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude_session_id: &str) -> Result<String, String> {
+    eprintln!("[browser] Checking for existing owned session...");
     let owned_sessions = get_registered_sessions(claude_session_id);
     if !owned_sessions.is_empty() {
         let mut list_args: Vec<String> = prefix.to_vec();
@@ -299,90 +426,49 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
             let list = String::from_utf8_lossy(&out.stdout);
             let live_ids: Vec<String> = list.lines()
                 .filter_map(|line| line.trim().split_whitespace().next().map(|s| s.to_string()))
-                .filter(|id| id.chars().all(|c| c.is_ascii_digit()))
+                .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
                 .collect();
             for id in &owned_sessions {
                 if live_ids.contains(id) {
-                    return id.clone();
+                    eprintln!("[browser] Reusing session {}.", id);
+                    return Ok(id.clone());
                 }
             }
         }
     }
-    let mut new_args: Vec<String> = prefix.to_vec();
-    new_args.extend(["session".into(), "new".into(), "--direct".into()]);
-    if let Ok(out) = Command::new(bin).args(&new_args).current_dir(cwd)
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-    {
-        let s = String::from_utf8_lossy(&out.stdout);
-        for line in s.lines() {
-            let trimmed = line.trim();
-            if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
-                register_browser_session(claude_session_id, trimmed);
-                return trimmed.to_string();
-            }
+
+    eprintln!("[browser] No live session found. Attempting session new --direct...");
+    if let Some(id) = try_new_session(bin, prefix, cwd, None) {
+        eprintln!("[browser] Session {} created.", id);
+        register_browser_session(claude_session_id, &id);
+        return Ok(id);
+    }
+
+    eprintln!("[browser] Direct session creation failed. Ensuring managed browser...");
+    let exe = ensure_managed_browser()?;
+
+    let port = find_free_port(9222);
+    launch_managed_browser(&exe, port)?;
+
+    eprintln!("[browser] Waiting for managed browser to accept connections...");
+    let direct_arg = format!("--direct=localhost:{}", port);
+    for attempt in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        eprintln!("[browser] Retry {} — connecting to managed browser...", attempt + 1);
+        if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
+            eprintln!("[browser] Session {} created via managed browser.", id);
+            register_browser_session(claude_session_id, &id);
+            return Ok(id);
         }
     }
-    let launcher_js = r#"
-const d=process.cwd();
-const {getBrowserExecutableCandidates}=require(d+'/dist/browser-config.js');
-const {spawn}=require('child_process');
-const path=require('path');
-const fs=require('fs');
-const candidates=getBrowserExecutableCandidates();
-const fallbacks=process.platform==='win32'?[process.env.ProgramFiles+'\\Google\\Chrome\\Application\\chrome.exe',process.env['ProgramFiles(x86)']+'\\Google\\Chrome\\Application\\chrome.exe',(process.env.LOCALAPPDATA||'')+'\\Google\\Chrome\\Application\\chrome.exe',process.env.ProgramFiles+'\\Microsoft\\Edge\\Application\\msedge.exe']:process.platform==='darwin'?['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']:['google-chrome','google-chrome-stable'].map(n=>{try{return require('child_process').execSync('which '+n,{encoding:'utf8'}).trim()}catch{return''}}).filter(Boolean);
-const browserPath=[...candidates,...fallbacks].find(p=>p&&fs.existsSync(p));
-if(!browserPath){process.stderr.write('No browser found');process.exit(1)}
-const port=process.env._CDP_PORT;
-const userDataDir=path.join(process.env.LOCALAPPDATA||process.env.HOME||'/tmp','Google','Chrome-PlugkitDebug');
-fs.mkdirSync(userDataDir,{recursive:true});
-const p=spawn(browserPath,['--remote-debugging-port='+port,'--user-data-dir='+userDataDir,'--no-first-run','--no-default-browser-check'],{detached:true,stdio:'ignore'});
-p.unref();
-process.stdout.write(port+'|'+String(p.pid||''));
-"#;
-    let pw_pkg = if bin == "node" && !prefix.is_empty() {
-        std::path::Path::new(&prefix[0]).parent().map(|p| p.to_path_buf())
-    } else {
-        which::which("playwriter").ok().and_then(|p| p.parent().map(|d| d.join("node_modules").join("playwriter")))
-    };
-    if let Some(ref pkg_dir) = pw_pkg {
-        if pkg_dir.join("dist").join("browser-launch.js").exists() {
-            let launcher_file = std::env::temp_dir().join("playwriter-launcher.cjs");
-            let _ = std::fs::write(&launcher_file, launcher_js);
-            let cdp_port = find_free_port(9222);
-            if let Ok(out) = Command::new("node")
-                .args(["-e", &format!("process.chdir({});{}",
-                    serde_json::to_string(&pkg_dir.to_string_lossy().to_string()).unwrap_or_default(),
-                    launcher_js)])
-                .env("_CDP_PORT", cdp_port.to_string())
-                .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-            {
-                let launch_out = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !launch_out.is_empty() {
-                    let port = launch_out.split('|').next().unwrap_or("9222");
-                    let direct_arg = format!("--direct=localhost:{}", port);
-                    for _ in 0..20 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        let mut retry_args: Vec<String> = prefix.to_vec();
-                        retry_args.extend(["session".into(), "new".into(), direct_arg.clone()]);
-                        if let Ok(out) = Command::new(bin).args(&retry_args).current_dir(cwd)
-                            .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-                        {
-                            let s = String::from_utf8_lossy(&out.stdout);
-                            for line in s.lines() {
-                                let trimmed = line.trim();
-                                if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
-                                    let _ = std::fs::remove_file(&launcher_file);
-                                    register_browser_session(claude_session_id, trimmed);
-                                    return trimmed.to_string();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    "1".to_string()
+
+    Err(format!(
+        "Browser session creation failed after managed browser install and 20 retries on port {}.\n\
+         Check that Chrome Portable installed correctly at: {}\n\
+         Run: plugkit exec browser 'console.log(await page.title())' to retry.",
+        port,
+        managed_browser_dir().display()
+    ))
 }
 
 pub fn kill_child(child: &mut Child) {
