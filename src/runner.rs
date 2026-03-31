@@ -50,7 +50,8 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             if let Some(sid) = params["sessionId"].as_str() {
                 state.store.set_session_id(task_id, sid);
             }
-            spawn_exec_process(state, task_id, &code, &runtime, &cwd).await?;
+            let sid = params["sessionId"].as_str().unwrap_or("").to_string();
+            spawn_exec_process(state, task_id, &code, &runtime, &cwd, &sid).await?;
             let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
             loop {
                 if tokio::time::Instant::now() >= deadline {
@@ -180,7 +181,7 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
     }
 }
 
-async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, runtime: &str, cwd: &str) -> anyhow::Result<()> {
+async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, runtime: &str, cwd: &str, session_id: &str) -> anyhow::Result<()> {
     let port = fs::read_to_string(port_file())?.trim().parse::<u16>()?;
     let code_file = env::temp_dir().join(format!("rs-exec-code-{}.txt", task_id));
     fs::write(&code_file, code)?;
@@ -191,6 +192,7 @@ async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, run
     env_vars.insert("RUNTIME".into(), runtime.to_string());
     env_vars.insert("CWD".into(), cwd.to_string());
     env_vars.insert("CODE_FILE".into(), code_file.to_string_lossy().to_string());
+    if !session_id.is_empty() { env_vars.insert("SESSION_ID".into(), session_id.to_string()); }
     #[cfg(windows)]
     let mut child = {
         use std::os::windows::process::CommandExt;

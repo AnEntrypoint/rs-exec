@@ -74,7 +74,7 @@ pub struct CompilePhase {
 }
 
 
-pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<SpawnResult> {
+pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> anyhow::Result<SpawnResult> {
     match runtime {
         "nodejs" | "typescript" => {
             let child = spawn_no_window(Command::new("bun")
@@ -132,8 +132,8 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str) -> anyhow::Result<Spa
             } else if trimmed.starts_with("session ") || trimmed == "session" {
                 args.extend(trimmed.split_whitespace().map(|s| s.to_string()));
             } else {
-                let session_id = get_or_create_browser_session(bin, &args, cwd);
-                args.extend(["-s".into(), session_id, "-e".into(), code.to_string()]);
+                let pw_session = get_or_create_browser_session(bin, &args, cwd, session_id);
+                args.extend(["-s".into(), pw_session, "-e".into(), code.to_string()]);
             };
             let child = spawn_no_window(Command::new(bin)
                 .args(&args)
@@ -206,7 +206,26 @@ fn find_free_port(start: u16) -> u16 {
     start
 }
 
-fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> String {
+fn browser_session_map_file() -> std::path::PathBuf {
+    std::env::temp_dir().join("plugkit-browser-sessions.json")
+}
+
+fn register_browser_session(claude_session_id: &str, pw_session_id: &str) {
+    if claude_session_id.is_empty() || pw_session_id.is_empty() { return; }
+    let path = browser_session_map_file();
+    let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let entry = map.entry(claude_session_id.to_string()).or_insert_with(|| serde_json::Value::Array(vec![]));
+    if let serde_json::Value::Array(arr) = entry {
+        let val = serde_json::Value::String(pw_session_id.to_string());
+        if !arr.contains(&val) { arr.push(val); }
+    }
+    let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
+}
+
+fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude_session_id: &str) -> String {
     let mut list_args: Vec<String> = prefix.to_vec();
     list_args.extend(["session".into(), "list".into()]);
     if let Ok(out) = Command::new(bin).args(&list_args).current_dir(cwd)
@@ -218,6 +237,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
             if !trimmed.is_empty() {
                 if let Some(id) = trimmed.split_whitespace().next() {
                     if id.chars().all(|c| c.is_ascii_digit()) {
+                        register_browser_session(claude_session_id, id);
                         return id.to_string();
                     }
                 }
@@ -233,6 +253,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
         for line in s.lines() {
             let trimmed = line.trim();
             if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
+                register_browser_session(claude_session_id, trimmed);
                 return trimmed.to_string();
             }
         }
@@ -287,6 +308,7 @@ process.stdout.write(port+'|'+String(p.pid||''));
                                 let trimmed = line.trim();
                                 if trimmed.chars().all(|c| c.is_ascii_digit()) && !trimmed.is_empty() {
                                     let _ = std::fs::remove_file(&launcher_file);
+                                    register_browser_session(claude_session_id, trimmed);
                                     return trimmed.to_string();
                                 }
                             }

@@ -43,10 +43,11 @@ fn main() {
 
     let code = fs::read_to_string(&code_file).unwrap_or_default();
     let _ = fs::remove_file(&code_file);
+    let session_id = env::var("SESSION_ID").unwrap_or_default();
 
     eprintln!("[exec-process] task={} runtime={} starting", task_id, runtime);
 
-    let spawn_result = match runtime::spawn_process(&runtime, &code, &cwd) {
+    let spawn_result = match runtime::spawn_process(&runtime, &code, &cwd, &session_id) {
         Ok(r) => r,
         Err(e) => {
             rpc_sync(port, "completeTask", serde_json::json!({ "taskId": task_id, "result": { "success": false, "exitCode": 1, "stdout": "", "stderr": e.to_string(), "error": e.to_string() } }));

@@ -21,6 +21,7 @@ pub fn run_exec_process() {
     let code_file = std::env::var("CODE_FILE").unwrap_or_default();
     let code = std::fs::read_to_string(&code_file).unwrap_or_default();
     let _ = std::fs::remove_file(&code_file);
+    let session_id = std::env::var("SESSION_ID").unwrap_or_default();
 
     eprintln!("[exec-process] task={} runtime={} starting", task_id, rt);
 
@@ -69,7 +70,7 @@ pub fn run_exec_process() {
         rpc_sync(port, "completeTask", serde_json::json!({ "taskId": task_id, "result": { "success": code == 0, "exitCode": code, "stdout": out, "stderr": err, "error": serde_json::Value::Null } }));
     }
 
-    let spawn_result = match runtime::spawn_process(&rt, &code, &cwd) {
+    let spawn_result = match runtime::spawn_process(&rt, &code, &cwd, &session_id) {
         Ok(r) => r,
         Err(e) => {
             rpc_sync(port, "completeTask", serde_json::json!({ "taskId": task_id, "result": { "success": false, "exitCode": 1, "stdout": "", "stderr": e.to_string(), "error": e.to_string() } }));
