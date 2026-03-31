@@ -225,21 +225,32 @@ fn register_browser_session(claude_session_id: &str, pw_session_id: &str) {
     let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
 }
 
+fn get_registered_sessions(claude_session_id: &str) -> Vec<String> {
+    let path = browser_session_map_file();
+    std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s).ok())
+        .and_then(|m| m.get(claude_session_id).and_then(|v| v.as_array()).map(|arr| {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        }))
+        .unwrap_or_default()
+}
+
 fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude_session_id: &str) -> String {
-    let mut list_args: Vec<String> = prefix.to_vec();
-    list_args.extend(["session".into(), "list".into()]);
-    if let Ok(out) = Command::new(bin).args(&list_args).current_dir(cwd)
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-    {
-        let list = String::from_utf8_lossy(&out.stdout);
-        for line in list.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                if let Some(id) = trimmed.split_whitespace().next() {
-                    if id.chars().all(|c| c.is_ascii_digit()) {
-                        register_browser_session(claude_session_id, id);
-                        return id.to_string();
-                    }
+    let owned_sessions = get_registered_sessions(claude_session_id);
+    if !owned_sessions.is_empty() {
+        let mut list_args: Vec<String> = prefix.to_vec();
+        list_args.extend(["session".into(), "list".into()]);
+        if let Ok(out) = Command::new(bin).args(&list_args).current_dir(cwd)
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+        {
+            let list = String::from_utf8_lossy(&out.stdout);
+            let live_ids: Vec<String> = list.lines()
+                .filter_map(|line| line.trim().split_whitespace().next().map(|s| s.to_string()))
+                .filter(|id| id.chars().all(|c| c.is_ascii_digit()))
+                .collect();
+            for id in &owned_sessions {
+                if live_ids.contains(id) {
+                    return id.clone();
                 }
             }
         }
