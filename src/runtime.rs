@@ -238,8 +238,9 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str) -> Str
         }
     }
     let launcher_js = r#"
-const {getBrowserExecutableCandidates}=require('./dist/browser-config.js');
-const {getBrowserLaunchArgs,getDefaultBrowserUserDataDir}=require('./dist/browser-launch.js');
+const d=process.cwd();
+const {getBrowserExecutableCandidates}=require(d+'/dist/browser-config.js');
+const {getBrowserLaunchArgs,getDefaultBrowserUserDataDir}=require(d+'/dist/browser-launch.js');
 const {spawn}=require('child_process');
 const path=require('path');
 const fs=require('fs');
@@ -247,7 +248,7 @@ const candidates=getBrowserExecutableCandidates();
 const fallbacks=process.platform==='win32'?[process.env.ProgramFiles+'\\Google\\Chrome\\Application\\chrome.exe',process.env['ProgramFiles(x86)']+'\\Google\\Chrome\\Application\\chrome.exe',(process.env.LOCALAPPDATA||'')+'\\Google\\Chrome\\Application\\chrome.exe',process.env.ProgramFiles+'\\Microsoft\\Edge\\Application\\msedge.exe']:process.platform==='darwin'?['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']:['google-chrome','google-chrome-stable'].map(n=>{try{return require('child_process').execSync('which '+n,{encoding:'utf8'}).trim()}catch{return''}}).filter(Boolean);
 const browserPath=[...candidates,...fallbacks].find(p=>p&&fs.existsSync(p));
 if(!browserPath){process.stderr.write('No browser found');process.exit(1)}
-const extPath=path.join(path.dirname(require.resolve('playwriter/package.json')),'dist','extension','chromium');
+const extPath=path.join(d,'dist','extension','chromium');
 const userDataDir=getDefaultBrowserUserDataDir()+'-direct';
 const args=getBrowserLaunchArgs({extensionPath:extPath,userDataDir,headless:false});
 args.splice(args.length-1,0,'--remote-debugging-port='+process.env._CDP_PORT);
