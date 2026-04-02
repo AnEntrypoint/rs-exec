@@ -63,15 +63,6 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
                     if *s == TaskStatus::Completed || *s == TaskStatus::Failed { break; }
                 }
             }
-            if let Some((s, result)) = state.store.get_task_status(task_id) {
-                if s == TaskStatus::Completed || s == TaskStatus::Failed {
-                    let entry = state.active.lock().unwrap().remove(&task_id);
-                    drop(entry);
-                    state.store.delete_task(task_id);
-                    let r = result.unwrap_or(TaskResult { success: false, stdout: String::new(), stderr: String::new(), error: Some("no result".into()), exit_code: 1 });
-                    return Ok(json!({ "result": { "success": r.success, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "exitCode": r.exit_code, "backgroundTaskId": task_id, "completed": true } }));
-                }
-            }
             Ok(json!({ "result": { "backgroundTaskId": task_id, "persisted": true } }))
         }
         "createTask" => {
@@ -83,6 +74,13 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         }
         "deleteSessionTasks" => {
             let sid = params["sessionId"].as_str().unwrap_or("");
+            if sid.is_empty() { return Ok(json!({ "deleted": 0 })); }
+            let task_ids = state.store.session_task_ids(sid);
+            let pids: Vec<u32> = {
+                let mut active = state.active.lock().unwrap();
+                task_ids.iter().filter_map(|id| active.remove(id).map(|(pid, stdin)| { drop(stdin); pid })).collect()
+            };
+            for pid in pids { kill_pid(pid); }
             let count = state.store.delete_session_tasks(sid);
             Ok(json!({ "deleted": count }))
         }

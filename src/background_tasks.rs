@@ -77,6 +77,14 @@ impl BackgroundTaskStore {
         }
     }
 
+    pub fn session_task_ids(&self, session_id: &str) -> Vec<u64> {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.values()
+            .filter(|t| t.session_id.as_deref() == Some(session_id))
+            .map(|t| t.id)
+            .collect()
+    }
+
     pub fn delete_session_tasks(&self, session_id: &str) -> u64 {
         let mut tasks = self.tasks.lock().unwrap();
         let ids: Vec<u64> = tasks.values()
