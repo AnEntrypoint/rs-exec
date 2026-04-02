@@ -230,6 +230,14 @@ fn kill_pid(pid: u32) {
 pub async fn run_server() -> anyhow::Result<()> {
     let store = BackgroundTaskStore::new();
     let state = Arc::new(AppState { store, active: Mutex::new(HashMap::new()) });
+    let cleanup_store = state.store.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            cleanup_store.cleanup_old_tasks();
+        }
+    });
     let app = Router::new()
         .route("/health", get(health))
         .route("/rpc", post(rpc_handler))

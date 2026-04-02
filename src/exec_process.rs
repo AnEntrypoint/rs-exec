@@ -45,8 +45,6 @@ fn main() {
     let _ = fs::remove_file(&code_file);
     let session_id = env::var("SESSION_ID").unwrap_or_default();
 
-    eprintln!("[exec-process] task={} runtime={} starting", task_id, runtime);
-
     let spawn_result = match runtime::spawn_process(&runtime, &code, &cwd, &session_id) {
         Ok(r) => r,
         Err(e) => {
@@ -61,42 +59,54 @@ fn main() {
         run_child_sync(task_id, port, spawn_result.child);
     }
 
-    eprintln!("[exec-process] task={} done", task_id);
 }
 
 fn run_child_sync(task_id: u64, port: u16, mut child: std::process::Child) {
-    let mut stdout_handle = child.stdout.take();
-    let mut stderr_handle = child.stderr.take();
-    let mut out = String::new();
-    let mut err = String::new();
-    let mut buf = [0u8; 4096];
+    use std::sync::{Arc, Mutex};
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+    let out = Arc::new(Mutex::new(String::new()));
+    let err = Arc::new(Mutex::new(String::new()));
 
-    if let Some(ref mut s) = stdout_handle {
-        loop {
-            match s.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                    out.push_str(&chunk);
-                    rpc_sync(port, "appendOutput", serde_json::json!({ "taskId": task_id, "type": "stdout", "data": chunk }));
+    let out_t = out.clone();
+    let stdout_thread = stdout_handle.map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                        out_t.lock().unwrap().push_str(&chunk);
+                        rpc_sync(port, "appendOutput", serde_json::json!({ "taskId": task_id, "type": "stdout", "data": chunk }));
+                    }
                 }
             }
-        }
-    }
-    if let Some(ref mut s) = stderr_handle {
-        loop {
-            match s.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                    err.push_str(&chunk);
-                    rpc_sync(port, "appendOutput", serde_json::json!({ "taskId": task_id, "type": "stderr", "data": chunk }));
+        })
+    });
+
+    let err_t = err.clone();
+    let stderr_thread = stderr_handle.map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                        err_t.lock().unwrap().push_str(&chunk);
+                        rpc_sync(port, "appendOutput", serde_json::json!({ "taskId": task_id, "type": "stderr", "data": chunk }));
+                    }
                 }
             }
-        }
-    }
+        })
+    });
+
+    if let Some(t) = stdout_thread { let _ = t.join(); }
+    if let Some(t) = stderr_thread { let _ = t.join(); }
     let code = child.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
-    eprintln!("[exec-process] task={} child exited code={}", task_id, code);
+    let out = out.lock().unwrap().clone();
+    let err = err.lock().unwrap().clone();
     rpc_sync(port, "completeTask", serde_json::json!({ "taskId": task_id, "result": { "success": code == 0, "exitCode": code, "stdout": out, "stderr": err, "error": serde_json::Value::Null } }));
 }
 
