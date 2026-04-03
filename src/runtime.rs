@@ -513,6 +513,20 @@ fn try_new_session(bin: &str, prefix: &[String], cwd: &str, direct_arg: Option<&
     None
 }
 
+fn find_extension_browser_port() -> Option<u16> {
+    for port in [9222u16, 9223, 9224, 9225, 9226, 9227, 9228, 9229] {
+        let addr = format!("127.0.0.1:{}", port);
+        if std::net::TcpStream::connect_timeout(
+            &addr.parse().ok()?,
+            std::time::Duration::from_millis(200),
+        ).is_ok() {
+            eprintln!("[browser] Found Chrome with remote debugging on port {}.", port);
+            return Some(port);
+        }
+    }
+    None
+}
+
 fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude_session_id: &str) -> Result<String, String> {
     eprintln!("[browser] Checking for existing owned session...");
     let owned_sessions = get_registered_sessions(claude_session_id);
@@ -534,6 +548,16 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                 }
             }
         }
+    }
+
+    if let Some(port) = find_extension_browser_port() {
+        let direct_arg = format!("--direct=localhost:{}", port);
+        if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
+            eprintln!("[browser] Connected to existing browser with extension on port {}.", port);
+            register_browser_session(claude_session_id, &id);
+            return Ok(id);
+        }
+        eprintln!("[browser] Found Chrome on port {} but playwriter session failed, falling back to managed browser.", port);
     }
 
     eprintln!("[browser] No live owned session. Launching dedicated managed browser for this session...");
