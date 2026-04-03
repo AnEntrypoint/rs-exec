@@ -296,6 +296,22 @@ fn managed_browser_dir() -> PathBuf {
     PathBuf::from(base).join("plugkit").join("chrome-portable")
 }
 
+fn system_chrome_exe() -> Option<PathBuf> {
+    let candidates: &[&str] = if cfg!(windows) {
+        &[
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ]
+    } else if cfg!(target_os = "macos") {
+        &["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    } else {
+        &["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
+    };
+    candidates.iter().map(PathBuf::from).find(|p| p.exists())
+        .or_else(|| which::which("google-chrome").ok())
+        .or_else(|| which::which("chromium").ok())
+}
+
 fn managed_browser_exe() -> Option<PathBuf> {
     let dir = managed_browser_dir();
     let candidates = [
@@ -304,7 +320,7 @@ fn managed_browser_exe() -> Option<PathBuf> {
         dir.join("chrome").join("chrome"),
         dir.join("chrome"),
     ];
-    candidates.into_iter().find(|p| p.exists())
+    candidates.into_iter().find(|p| p.exists()).or_else(system_chrome_exe)
 }
 
 fn managed_browser_user_data() -> PathBuf {
