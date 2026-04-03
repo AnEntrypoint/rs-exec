@@ -450,8 +450,16 @@ fn try_new_session(bin: &str, prefix: &[String], cwd: &str, direct_arg: Option<&
         let s = String::from_utf8_lossy(&out.stdout);
         for line in s.lines() {
             let trimmed = line.trim();
-            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+            if trimmed.is_empty() { continue; }
+            if trimmed.chars().all(|c| c.is_ascii_digit()) {
                 return Some(trimmed.to_string());
+            }
+            if let Some(rest) = trimmed.strip_prefix("Session ") {
+                if let Some(id) = rest.split_whitespace().next() {
+                    if id.chars().all(|c| c.is_ascii_digit()) {
+                        return Some(id.to_string());
+                    }
+                }
             }
         }
     }
