@@ -412,6 +412,8 @@ fn launch_managed_browser(exe: &PathBuf, port: u16) -> Result<(), String> {
         "--no-first-run",
         "--no-default-browser-check",
         "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
     ]);
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
