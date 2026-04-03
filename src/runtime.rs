@@ -400,8 +400,23 @@ fn ensure_managed_browser() -> Result<PathBuf, String> {
     ))
 }
 
+fn kill_stale_managed_browser(user_data: &std::path::Path) {
+    let profile_str = user_data.to_string_lossy().to_lowercase();
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+    for (pid, proc) in sys.processes() {
+        let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
+        if cmd.iter().any(|a| a.contains("user-data-dir") && a.contains(profile_str.as_str())) {
+            eprintln!("[browser] Killing stale managed browser pid {}.", pid);
+            proc.kill();
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+}
+
 fn launch_managed_browser(exe: &PathBuf, port: u16) -> Result<(), String> {
     let user_data = managed_browser_user_data();
+    kill_stale_managed_browser(&user_data);
     std::fs::create_dir_all(&user_data)
         .map_err(|e| format!("Failed to create browser profile dir: {}", e))?;
     eprintln!("[browser] Launching managed browser on port {}...", port);
