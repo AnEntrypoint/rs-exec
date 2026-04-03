@@ -296,20 +296,31 @@ fn managed_browser_dir() -> PathBuf {
     PathBuf::from(base).join("plugkit").join("chrome-portable")
 }
 
-fn system_chrome_exe() -> Option<PathBuf> {
-    let candidates: &[&str] = if cfg!(windows) {
-        &[
-            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-        ]
-    } else if cfg!(target_os = "macos") {
-        &["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
-    } else {
-        &["/usr/bin/google-chrome", "/usr/bin/chromium-browser", "/usr/bin/chromium"]
-    };
-    candidates.iter().map(PathBuf::from).find(|p| p.exists())
-        .or_else(|| which::which("google-chrome").ok())
-        .or_else(|| which::which("chromium").ok())
+fn playwright_chromium_exe() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .map(PathBuf::from)?;
+    let pw_dir = base.join("ms-playwright");
+    if !pw_dir.exists() { return None; }
+    let entries = std::fs::read_dir(&pw_dir).ok()?;
+    let mut chromium_dirs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with("chromium")).unwrap_or(false))
+        .collect();
+    chromium_dirs.sort_by(|a, b| b.cmp(a));
+    for dir in chromium_dirs {
+        let candidates = [
+            dir.join("chrome-win64").join("chrome.exe"),
+            dir.join("chrome-win").join("chrome.exe"),
+            dir.join("chrome").join("chrome"),
+        ];
+        if let Some(p) = candidates.into_iter().find(|p| p.exists()) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn managed_browser_exe() -> Option<PathBuf> {
@@ -320,7 +331,7 @@ fn managed_browser_exe() -> Option<PathBuf> {
         dir.join("chrome").join("chrome"),
         dir.join("chrome"),
     ];
-    candidates.into_iter().find(|p| p.exists()).or_else(system_chrome_exe)
+    candidates.into_iter().find(|p| p.exists()).or_else(playwright_chromium_exe)
 }
 
 fn managed_browser_user_data() -> PathBuf {
