@@ -1,10 +1,68 @@
 use axum::{extract::State, routing::{get, post}, Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, env, fs, path::PathBuf, process::{ChildStdin, Command, Stdio}, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, env, fs, path::PathBuf, process::{ChildStdin, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::net::TcpListener;
 use rand::Rng;
 use crate::background_tasks::{BackgroundTaskStore, TaskResult, TaskStatus};
+use crate::runtime::kill_session_browser;
+
+const IDLE_TIMEOUT_SECS: u64 = 15 * 60;
+
+fn session_activity_file() -> PathBuf {
+    env::temp_dir().join("plugkit-session-activity.json")
+}
+
+fn touch_session_activity(session_id: &str) {
+    if session_id.is_empty() { return; }
+    let path = session_activity_file();
+    let mut map: serde_json::Map<String, Value> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    map.insert(session_id.to_string(), json!(now));
+    let _ = fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
+}
+
+fn cleanup_idle_sessions(store: &Arc<BackgroundTaskStore>, active: &Arc<Mutex<HashMap<u64, (u32, Option<ChildStdin>)>>>) {
+    let path = session_activity_file();
+    let map: serde_json::Map<String, Value> = match fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(m) => m,
+        None => return,
+    };
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let mut dead_sessions: Vec<String> = Vec::new();
+    for (sid, last_val) in &map {
+        if let Some(last) = last_val.as_u64() {
+            if now.saturating_sub(last) > IDLE_TIMEOUT_SECS {
+                dead_sessions.push(sid.clone());
+            }
+        }
+    }
+    for sid in &dead_sessions {
+        eprintln!("[runner] Session {} idle >15min — cleaning up.", sid);
+        let task_ids = store.session_task_ids(sid);
+        let pids: Vec<u32> = {
+            let mut a = active.lock().unwrap();
+            task_ids.iter().filter_map(|id| a.remove(id).map(|(pid, stdin)| { drop(stdin); pid })).collect()
+        };
+        for pid in pids { kill_pid(pid); }
+        store.delete_session_tasks(sid);
+        kill_session_browser(sid);
+    }
+    if !dead_sessions.is_empty() {
+        let mut updated: serde_json::Map<String, Value> = fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        for sid in &dead_sessions { updated.remove(sid); }
+        let _ = fs::write(&path, serde_json::to_string(&updated).unwrap_or_default());
+    }
+}
 
 fn port_file() -> PathBuf {
     env::temp_dir().join("glootie-runner.port")
@@ -16,7 +74,7 @@ fn self_exe() -> String {
 
 pub struct AppState {
     store: Arc<BackgroundTaskStore>,
-    active: Mutex<HashMap<u64, (u32, Option<ChildStdin>)>>,
+    active: Arc<Mutex<HashMap<u64, (u32, Option<ChildStdin>)>>>,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +109,7 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
                 state.store.set_session_id(task_id, sid);
             }
             let sid = params["sessionId"].as_str().unwrap_or("").to_string();
+            touch_session_activity(&sid);
             spawn_exec_process(state, task_id, &code, &runtime, &cwd, &sid).await?;
             let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
             loop {
@@ -75,6 +134,7 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         "deleteSessionTasks" => {
             let sid = params["sessionId"].as_str().unwrap_or("");
             if sid.is_empty() { return Ok(json!({ "deleted": 0 })); }
+            touch_session_activity(sid);
             let task_ids = state.store.session_task_ids(sid);
             let pids: Vec<u32> = {
                 let mut active = state.active.lock().unwrap();
@@ -227,13 +287,21 @@ fn kill_pid(pid: u32) {
 
 pub async fn run_server() -> anyhow::Result<()> {
     let store = BackgroundTaskStore::new();
-    let state = Arc::new(AppState { store, active: Mutex::new(HashMap::new()) });
+    let state = Arc::new(AppState { store, active: Arc::new(Mutex::new(HashMap::new())) });
     let cleanup_store = state.store.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             interval.tick().await;
             cleanup_store.cleanup_old_tasks();
+        }
+    });
+    let idle_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_idle_sessions(&idle_state.store, &idle_state.active);
         }
     });
     let app = Router::new()

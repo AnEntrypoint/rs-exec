@@ -334,11 +334,58 @@ fn managed_browser_exe() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists()).or_else(playwright_chromium_exe)
 }
 
-fn managed_browser_user_data() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-    PathBuf::from(base).join("plugkit").join("chrome-profile")
+fn managed_browser_user_data(cwd: &str) -> PathBuf {
+    PathBuf::from(cwd).join(".plugkit-browser-profile")
+}
+
+fn browser_port_map_file() -> std::path::PathBuf {
+    std::env::temp_dir().join("plugkit-browser-ports.json")
+}
+
+fn get_session_browser_port(claude_session_id: &str) -> Option<u16> {
+    let path = browser_port_map_file();
+    std::fs::read_to_string(&path).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s).ok())
+        .and_then(|m| m.get(claude_session_id).and_then(|v| v.as_u64()).map(|p| p as u16))
+}
+
+fn set_session_browser_port(claude_session_id: &str, port: u16) {
+    let path = browser_port_map_file();
+    let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    map.insert(claude_session_id.to_string(), serde_json::Value::Number(serde_json::Number::from(port)));
+    let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
+}
+
+pub fn kill_session_browser(claude_session_id: &str) {
+    if let Some(port) = get_session_browser_port(claude_session_id) {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+        let port_arg = format!("--remote-debugging-port={}", port);
+        for (_pid, proc) in sys.processes() {
+            let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
+            if cmd.iter().any(|a| a.contains(port_arg.as_str())) {
+                eprintln!("[browser] Killing idle session browser on port {} for session {}.", port, claude_session_id);
+                proc.kill();
+            }
+        }
+        let port_path = browser_port_map_file();
+        if let Ok(s) = std::fs::read_to_string(&port_path) {
+            if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
+                map.remove(claude_session_id);
+                let _ = std::fs::write(&port_path, serde_json::to_string(&map).unwrap_or_default());
+            }
+        }
+        let sess_path = browser_session_map_file();
+        if let Ok(s) = std::fs::read_to_string(&sess_path) {
+            if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
+                map.remove(claude_session_id);
+                let _ = std::fs::write(&sess_path, serde_json::to_string(&map).unwrap_or_default());
+            }
+        }
+    }
 }
 
 fn ensure_managed_browser() -> Result<PathBuf, String> {
@@ -414,8 +461,8 @@ fn kill_stale_managed_browser(user_data: &std::path::Path) {
     std::thread::sleep(std::time::Duration::from_millis(500));
 }
 
-fn launch_managed_browser(exe: &PathBuf, port: u16) -> Result<(), String> {
-    let user_data = managed_browser_user_data();
+fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), String> {
+    let user_data = managed_browser_user_data(cwd);
     kill_stale_managed_browser(&user_data);
     std::fs::create_dir_all(&user_data)
         .map_err(|e| format!("Failed to create browser profile dir: {}", e))?;
@@ -482,33 +529,38 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                 .collect();
             for id in &owned_sessions {
                 if live_ids.contains(id) {
-                    eprintln!("[browser] Reusing session {}.", id);
+                    eprintln!("[browser] Reusing owned session {}.", id);
                     return Ok(id.clone());
                 }
             }
         }
     }
 
-    eprintln!("[browser] No live session found. Attempting session new --direct...");
-    if let Some(id) = try_new_session(bin, prefix, cwd, None) {
-        eprintln!("[browser] Session {} created.", id);
-        register_browser_session(claude_session_id, &id);
-        return Ok(id);
-    }
-
-    eprintln!("[browser] Direct session creation failed. Ensuring managed browser...");
+    eprintln!("[browser] No live owned session. Launching dedicated managed browser for this session...");
     let exe = ensure_managed_browser()?;
+    let port = if let Some(p) = get_session_browser_port(claude_session_id) {
+        let direct_arg = format!("--direct=localhost:{}", p);
+        if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
+            eprintln!("[browser] Reconnected to existing session browser on port {}.", p);
+            register_browser_session(claude_session_id, &id);
+            return Ok(id);
+        }
+        eprintln!("[browser] Existing session browser on port {} unreachable, launching new.", p);
+        find_free_port(9222)
+    } else {
+        find_free_port(9222)
+    };
 
-    let port = find_free_port(9222);
-    launch_managed_browser(&exe, port)?;
+    launch_managed_browser(&exe, port, cwd)?;
+    set_session_browser_port(claude_session_id, port);
 
-    eprintln!("[browser] Waiting for managed browser to accept connections...");
+    eprintln!("[browser] Waiting for managed browser on port {}...", port);
     let direct_arg = format!("--direct=localhost:{}", port);
     for attempt in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(500));
         eprintln!("[browser] Retry {} — connecting to managed browser...", attempt + 1);
         if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
-            eprintln!("[browser] Session {} created via managed browser.", id);
+            eprintln!("[browser] Session {} created via managed browser on port {}.", id, port);
             register_browser_session(claude_session_id, &id);
             return Ok(id);
         }
