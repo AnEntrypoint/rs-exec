@@ -507,6 +507,10 @@ fn find_playwriter_extension() -> Option<std::path::PathBuf> {
 fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), String> {
     let user_data = managed_browser_user_data(cwd);
     kill_stale_managed_browser(&user_data);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    for lock_name in &["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"] {
+        let _ = std::fs::remove_file(user_data.join(lock_name));
+    }
     std::fs::create_dir_all(&user_data)
         .map_err(|e| format!("Failed to create browser profile dir: {}", e))?;
     eprintln!("[browser] Launching managed browser on port {}...", port);
