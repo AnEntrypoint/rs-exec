@@ -323,15 +323,37 @@ fn playwright_chromium_exe() -> Option<PathBuf> {
     None
 }
 
+fn system_chrome_exe() -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = {
+        let mut v = vec![];
+        for var in &["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+            if let Ok(base) = std::env::var(var) {
+                v.push(PathBuf::from(&base).join("Google").join("Chrome").join("Application").join("chrome.exe"));
+                v.push(PathBuf::from(&base).join("Chromium").join("Application").join("chrome.exe"));
+            }
+        }
+        v.push(PathBuf::from("/usr/bin/google-chrome"));
+        v.push(PathBuf::from("/usr/bin/chromium-browser"));
+        v.push(PathBuf::from("/usr/bin/chromium"));
+        v
+    };
+    candidates.into_iter().find(|p| p.exists())
+        .or_else(|| which::which("google-chrome").ok())
+        .or_else(|| which::which("chromium").ok())
+        .or_else(|| which::which("chromium-browser").ok())
+}
+
 fn managed_browser_exe() -> Option<PathBuf> {
     let dir = managed_browser_dir();
-    let candidates = [
+    let portable_candidates = [
         dir.join("GoogleChromePortable").join("App").join("Chrome-bin").join("chrome.exe"),
         dir.join("GoogleChromePortable").join("App").join("Chrome").join("chrome"),
         dir.join("chrome").join("chrome"),
         dir.join("chrome"),
     ];
-    candidates.into_iter().find(|p| p.exists()).or_else(playwright_chromium_exe)
+    portable_candidates.into_iter().find(|p| p.exists())
+        .or_else(playwright_chromium_exe)
+        .or_else(system_chrome_exe)
 }
 
 fn managed_browser_user_data(cwd: &str) -> PathBuf {
