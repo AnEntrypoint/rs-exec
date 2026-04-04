@@ -461,25 +461,51 @@ fn kill_stale_managed_browser(user_data: &std::path::Path) {
     std::thread::sleep(std::time::Duration::from_millis(500));
 }
 
+fn find_playwriter_extension() -> Option<std::path::PathBuf> {
+    let candidates: Vec<std::path::PathBuf> = {
+        let mut v = vec![];
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            v.push(std::path::PathBuf::from(&appdata).join("npm").join("node_modules").join("playwriter").join("dist").join("extension"));
+        }
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            v.push(std::path::PathBuf::from(&home).join(".npm-global").join("lib").join("node_modules").join("playwriter").join("dist").join("extension"));
+            v.push(std::path::PathBuf::from(&home).join(".local").join("lib").join("node_modules").join("playwriter").join("dist").join("extension"));
+        }
+        if let Ok(out) = Command::new("npm").args(["root", "-g"]).output() {
+            let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !root.is_empty() {
+                v.push(std::path::PathBuf::from(root).join("playwriter").join("dist").join("extension"));
+            }
+        }
+        v
+    };
+    candidates.into_iter().find(|p| p.join("manifest.json").exists())
+}
+
 fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), String> {
     let user_data = managed_browser_user_data(cwd);
     kill_stale_managed_browser(&user_data);
     std::fs::create_dir_all(&user_data)
         .map_err(|e| format!("Failed to create browser profile dir: {}", e))?;
     eprintln!("[browser] Launching managed browser on port {}...", port);
+    let mut args: Vec<String> = vec![
+        format!("--remote-debugging-port={}", port),
+        format!("--user-data-dir={}", user_data.display()),
+        "--no-first-run".into(),
+        "--no-default-browser-check".into(),
+        "--no-sandbox".into(),
+    ];
+    if let Some(ext_path) = find_playwriter_extension() {
+        eprintln!("[browser] Loading playwriter extension from {}.", ext_path.display());
+        args.push(format!("--load-extension={}", ext_path.display()));
+    } else {
+        eprintln!("[browser] Playwriter extension not found, launching without extension.");
+    }
     let mut cmd = Command::new(exe);
-    cmd.args([
-        &format!("--remote-debugging-port={}", port),
-        &format!("--user-data-dir={}", user_data.display()),
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-    ]);
+    cmd.args(&args);
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    { cmd.creation_flags(0); }
     let _child = cmd.spawn().map_err(|e| format!("Failed to launch browser: {}", e))?;
     Ok(())
 }
@@ -513,20 +539,6 @@ fn try_new_session(bin: &str, prefix: &[String], cwd: &str, direct_arg: Option<&
     None
 }
 
-fn find_extension_browser_port() -> Option<u16> {
-    for port in [9222u16, 9223, 9224, 9225, 9226, 9227, 9228, 9229] {
-        let addr = format!("127.0.0.1:{}", port);
-        if std::net::TcpStream::connect_timeout(
-            &addr.parse().ok()?,
-            std::time::Duration::from_millis(200),
-        ).is_ok() {
-            eprintln!("[browser] Found Chrome with remote debugging on port {}.", port);
-            return Some(port);
-        }
-    }
-    None
-}
-
 fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude_session_id: &str) -> Result<String, String> {
     eprintln!("[browser] Checking for existing owned session...");
     let owned_sessions = get_registered_sessions(claude_session_id);
@@ -548,16 +560,6 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                 }
             }
         }
-    }
-
-    if let Some(port) = find_extension_browser_port() {
-        let direct_arg = format!("--direct=localhost:{}", port);
-        if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
-            eprintln!("[browser] Connected to existing browser with extension on port {}.", port);
-            register_browser_session(claude_session_id, &id);
-            return Ok(id);
-        }
-        eprintln!("[browser] Found Chrome on port {} but playwriter session failed, falling back to managed browser.", port);
     }
 
     eprintln!("[browser] No live owned session. Launching dedicated managed browser for this session...");
