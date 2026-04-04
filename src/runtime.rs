@@ -128,9 +128,10 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
             let trimmed = code.trim();
             let mut args = prefix;
             if trimmed.starts_with("playwriter ") {
-                args.extend(trimmed.strip_prefix("playwriter ").unwrap().split_whitespace().map(|s| s.to_string()));
+                let rest = trimmed.strip_prefix("playwriter ").unwrap();
+                args.extend(shlex::split(rest).unwrap_or_else(|| rest.split_whitespace().map(str::to_string).collect()));
             } else if trimmed.starts_with("session ") || trimmed == "session" {
-                args.extend(trimmed.split_whitespace().map(|s| s.to_string()));
+                args.extend(shlex::split(trimmed).unwrap_or_else(|| trimmed.split_whitespace().map(str::to_string).collect()));
             } else {
                 let pw_session = get_or_create_browser_session(bin, &args, cwd, session_id)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
