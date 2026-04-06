@@ -170,6 +170,25 @@ impl BackgroundTaskStore {
         tasks.values().map(|t| (t.id, t.status.clone())).collect()
     }
 
+    pub fn drain_session_output(&self, session_id: &str) -> Vec<(u64, TaskStatus, Vec<OutputEntry>)> {
+        let ids: Vec<u64> = {
+            let tasks = self.tasks.lock().unwrap();
+            tasks.values()
+                .filter(|t| t.session_id.as_deref() == Some(session_id))
+                .map(|t| t.id)
+                .collect()
+        };
+        let mut result = Vec::new();
+        let mut tasks = self.tasks.lock().unwrap();
+        for id in ids {
+            if let Some(t) = tasks.get_mut(&id) {
+                let output = std::mem::take(&mut t.output_log);
+                result.push((t.id, t.status.clone(), output));
+            }
+        }
+        result
+    }
+
     fn notify(&self, id: u64) {
         let notifiers = self.notifiers.lock().unwrap();
         if let Some(n) = notifiers.get(&id) {

@@ -189,6 +189,28 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             }).collect();
             Ok(json!({ "tasks": tasks }))
         }
+        "listSessionTasks" => {
+            let sid = params["sessionId"].as_str().unwrap_or("");
+            let ids = state.store.session_task_ids(sid);
+            let tasks_lock = state.store.list_tasks();
+            let tasks: Vec<Value> = tasks_lock.iter()
+                .filter(|(id, _)| ids.contains(id))
+                .map(|(id, s)| {
+                    let status = match s { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" };
+                    json!({ "id": id, "status": status })
+                }).collect();
+            Ok(json!({ "tasks": tasks }))
+        }
+        "drainSessionOutput" => {
+            let sid = params["sessionId"].as_str().unwrap_or("");
+            let entries = state.store.drain_session_output(sid);
+            let tasks: Vec<Value> = entries.into_iter().map(|(id, status, output)| {
+                let status_str = match status { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" };
+                let out: Vec<Value> = output.into_iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
+                json!({ "id": id, "status": status_str, "output": out })
+            }).collect();
+            Ok(json!({ "tasks": tasks }))
+        }
         "appendOutput" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
             let t = params["type"].as_str().unwrap_or("stdout");
