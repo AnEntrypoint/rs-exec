@@ -103,7 +103,9 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             let code = params["code"].as_str().unwrap_or("").to_string();
             let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
             let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();
-            let timeout = params["timeout"].as_u64().unwrap_or(15000);
+            let _timeout = params["timeout"].as_u64().unwrap_or(15000); // accepted but unused; client polls
+            // backgroundTaskId is no longer pre-created by the client; the runner always
+            // creates the task atomically here so the ID is only issued after spawn succeeds.
             let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
             if let Some(sid) = params["sessionId"].as_str() {
                 state.store.set_session_id(task_id, sid);
@@ -111,17 +113,10 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             let sid = params["sessionId"].as_str().unwrap_or("").to_string();
             touch_session_activity(&sid);
             spawn_exec_process(state, task_id, &code, &runtime, &cwd, &sid).await?;
-            let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
-            loop {
-                if tokio::time::Instant::now() >= deadline {
-                    break;
-                }
-                let _done = state.store.wait_for_output(task_id, 200).await;
-                let status = state.store.get_task_status(task_id);
-                if let Some((s, _)) = &status {
-                    if *s == TaskStatus::Completed || *s == TaskStatus::Failed { break; }
-                }
-            }
+            // Return the task ID immediately — the client polls via getTask/getAndClearOutput.
+            // Do NOT block here until the task completes; that held the TCP connection for up
+            // to 15s and caused the client's 2s RPC timeout to fire before the ID was returned,
+            // making the task ID unretrievable ("Task not found" on the next plugkit status call).
             Ok(json!({ "result": { "backgroundTaskId": task_id, "persisted": true } }))
         }
         "createTask" => {
