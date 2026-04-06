@@ -289,10 +289,15 @@ process.stdin.resume();\n\
 process.stdin.on('data', buf => port.write(buf));\n",
                 port_name, baud, port_name, baud);
             std::fs::write(&script_path, &script)?;
-            // Use node with the looper's serialport install
+            // Use node with global serialport
+            let global_modules = std::process::Command::new("npm")
+                .args(["root", "-g"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
             let child = spawn_no_window(Command::new("node")
                 .arg(&script_path)
-                .env("NODE_PATH", "C:/dev/looper/node_modules")
+                .env("NODE_PATH", &global_modules)
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
