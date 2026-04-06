@@ -44,6 +44,7 @@ enum Cmd {
     #[command(name = "type")] Type { task_id: String, input: Vec<String> },
     Runner { sub: String },
     Pm2list,
+    #[command(name = "kill-port")] KillPort { port: u16 },
 }
 
 async fn ensure_runner() -> anyhow::Result<()> {
@@ -255,6 +256,16 @@ async fn main() {
                     }
                 }
                 _ => { eprintln!("Unknown runner subcommand: {}", sub); exit_code = 1; }
+            }
+            Cmd::KillPort { port } => {
+                ensure_runner().await?;
+                let res = rpc_client::rpc_call("killPort", json!({ "port": port }), 10000).await?;
+                if res["ok"].as_bool().unwrap_or(false) {
+                    println!("Killed process on port {} (pid {})", port, res["killedPid"]);
+                } else {
+                    eprintln!("No process found listening on port {}", port);
+                    exit_code = 1;
+                }
             }
             Cmd::Pm2list => {
                 ensure_runner().await?;

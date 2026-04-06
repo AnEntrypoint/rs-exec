@@ -231,6 +231,25 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             let procs: Vec<Value> = active.iter().map(|(id, (pid, _))| json!({ "name": format!("rs-exec-task-{}", id), "status": "online", "pid": pid })).collect();
             Ok(json!({ "processes": procs }))
         }
+        "killPort" => {
+            let port = params["port"].as_u64().unwrap_or(0) as u16;
+            if port == 0 { return Ok(json!({ "ok": false, "error": "port required" })); }
+            let output = std::process::Command::new("netstat").args(["-ano"]).output()?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let port_str = format!(":{}", port);
+            let mut killed_pid = 0u32;
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 5 && parts[1].ends_with(&port_str) && parts[3] == "LISTENING" {
+                    if let Ok(pid) = parts[4].parse::<u32>() {
+                        kill_pid(pid);
+                        killed_pid = pid;
+                        break;
+                    }
+                }
+            }
+            Ok(json!({ "ok": killed_pid != 0, "killedPid": killed_pid }))
+        }
         "shutdown" => {
             tokio::spawn(async { tokio::time::sleep(Duration::from_millis(100)).await; std::process::exit(0); });
             Ok(json!({ "ok": true }))
