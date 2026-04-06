@@ -58,6 +58,28 @@ fn playwriter() -> &'static str {
     })
 }
 
+fn strip_quotes(s: &str) -> String {
+    let s = s.trim();
+    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
+        s[1..s.len()-1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn split_playwriter_args(rest: &str) -> Vec<String> {
+    // Find -e and treat everything after it as the JS code (preserve spaces, strip outer quotes)
+    if let Some(e_pos) = rest.find(" -e ") {
+        let before = &rest[..e_pos];
+        let after = rest[e_pos + 4..].trim();
+        let mut args: Vec<String> = shlex::split(before).unwrap_or_else(|| before.split_whitespace().map(str::to_string).collect());
+        args.push("-e".to_string());
+        args.push(strip_quotes(after));
+        return args;
+    }
+    shlex::split(rest).unwrap_or_else(|| rest.split_whitespace().map(str::to_string).collect())
+}
+
 pub struct SpawnResult {
     pub child: Child,
     pub _tmpdir: Option<TempDir>,
@@ -129,7 +151,7 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
             let mut args = prefix;
             if trimmed.starts_with("playwriter ") {
                 let rest = trimmed.strip_prefix("playwriter ").unwrap();
-                args.extend(shlex::split(rest).unwrap_or_else(|| rest.split_whitespace().map(str::to_string).collect()));
+                args.extend(split_playwriter_args(rest));
             } else if trimmed.starts_with("session ") || trimmed == "session" {
                 args.extend(shlex::split(trimmed).unwrap_or_else(|| trimmed.split_whitespace().map(str::to_string).collect()));
             } else {
@@ -589,7 +611,13 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
         }
     }
 
-    eprintln!("[browser] No live owned session. Launching dedicated managed browser for this session...");
+    eprintln!("[browser] No live owned session. Trying --direct (user Chrome with debug port)...");
+    if let Some(id) = try_new_session(bin, prefix, cwd, None) {
+        eprintln!("[browser] Connected to user Chrome via --direct, session {}.", id);
+        register_browser_session(claude_session_id, &id);
+        return Ok(id);
+    }
+    eprintln!("[browser] --direct failed. Launching dedicated managed browser for this session...");
     let exe = ensure_managed_browser()?;
     let port = if let Some(p) = get_session_browser_port(claude_session_id) {
         let direct_arg = format!("--direct=localhost:{}", p);
