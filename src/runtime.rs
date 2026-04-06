@@ -270,6 +270,32 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
             let phase = CompilePhase { bin_path: PathBuf::new(), runtime: "java".to_string(), cp: Some(cp), class_name: Some(class_name.to_string()), cwd: cwd.to_string(), _tmpdir: tmp };
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: Some(phase) })
         }
+        "serial" => {
+            // code = "COM11" or "COM11 115200"
+            let mut parts = code.trim().split_whitespace();
+            let port_name = parts.next().unwrap_or("COM1");
+            let baud: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(115200);
+            // Write a small JS file that reads the serial port and pipes to stdout
+            let tmp = tempfile::tempdir()?;
+            let script_path = tmp.path().join("serial.mjs");
+            let script = format!(
+"import {{ SerialPort }} from 'serialport';\n\
+const port = new SerialPort({{ path: '{}', baudRate: {} }});\n\
+port.on('open', () => process.stderr.write('[serial] connected to {} at {}\\n'));\n\
+port.on('data', buf => process.stdout.write(buf));\n\
+port.on('error', e => {{ process.stderr.write('[serial error] ' + e.message + '\\n'); process.exit(1); }});\n\
+port.on('close', () => {{ process.stderr.write('[serial] disconnected\\n'); process.exit(0); }});\n\
+process.stdin.resume();\n\
+process.stdin.on('data', buf => port.write(buf));\n",
+                port_name, baud, port_name, baud);
+            std::fs::write(&script_path, &script)?;
+            // Use node with the looper's serialport install
+            let child = spawn_no_window(Command::new("node")
+                .arg(&script_path)
+                .env("NODE_PATH", "C:/dev/looper/node_modules")
+                .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
+            Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
+        }
         _ => Err(anyhow::anyhow!("Unsupported runtime: {}", runtime))
     }
 }
