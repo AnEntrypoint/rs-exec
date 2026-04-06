@@ -3,7 +3,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, env, fs, path::PathBuf, process::{ChildStdin, Command, Stdio}, sync::{Arc, Mutex}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use tokio::net::TcpListener;
-use rand::Rng;
 use crate::background_tasks::{BackgroundTaskStore, TaskResult, TaskStatus};
 use crate::runtime::kill_session_browser;
 
@@ -322,17 +321,22 @@ pub async fn run_server() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/rpc", post(rpc_handler))
         .with_state(state);
-    for _ in 0..10 {
-        let port = rand::thread_rng().gen_range(30000u16..40000u16);
-        match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
+    const FIXED_PORT: u16 = 32882;
+    // Retry binding fixed port for up to 2s in case a previous runner is still shutting down
+    for attempt in 0..5 {
+        match TcpListener::bind(format!("127.0.0.1:{}", FIXED_PORT)).await {
             Ok(listener) => {
-                fs::write(port_file(), port.to_string())?;
-                eprintln!("[runner] listening on port {}", port);
+                fs::write(port_file(), FIXED_PORT.to_string())?;
+                eprintln!("[runner] listening on port {}", FIXED_PORT);
                 axum::serve(listener, app).await?;
                 return Ok(());
             }
-            Err(_) => continue,
+            Err(_) => {
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
         }
     }
-    Err(anyhow::anyhow!("Could not bind port after 10 attempts"))
+    Err(anyhow::anyhow!("Could not bind fixed port {} after retries", FIXED_PORT))
 }
