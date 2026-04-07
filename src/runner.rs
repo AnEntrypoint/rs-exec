@@ -174,13 +174,22 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         }
         "deleteTask" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
+            let session_id = state.store.get_task_session_id(id);
             let entry = state.active.lock().unwrap().remove(&id);
-            if let Some((pid, stdin)) = entry {
+            let process_killed = if let Some((pid, stdin)) = entry {
                 drop(stdin);
                 kill_pid(pid);
-            }
+                true
+            } else {
+                false
+            };
             state.store.delete_task(id);
-            Ok(json!({}))
+            if let Some(ref sid) = session_id {
+                if !sid.is_empty() {
+                    kill_session_browser(sid);
+                }
+            }
+            Ok(json!({ "processKilled": process_killed, "browserSessionReleased": session_id.is_some() }))
         }
         "listTasks" => {
             let tasks: Vec<Value> = state.store.list_tasks().iter().map(|(id, s)| {

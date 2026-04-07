@@ -160,6 +160,11 @@ impl BackgroundTaskStore {
         tasks.get(&id).map(|t| (t.status.clone(), t.result.clone()))
     }
 
+    pub fn get_task_session_id(&self, id: u64) -> Option<String> {
+        let tasks = self.tasks.lock().unwrap();
+        tasks.get(&id).and_then(|t| t.session_id.clone())
+    }
+
     pub fn delete_task(&self, id: u64) {
         self.tasks.lock().unwrap().remove(&id);
         self.notifiers.lock().unwrap().remove(&id);
