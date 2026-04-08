@@ -633,13 +633,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
         }
     }
 
-    eprintln!("[browser] No live owned session. Trying --direct (user Chrome with debug port)...");
-    if let Some(id) = try_new_session(bin, prefix, cwd, None) {
-        eprintln!("[browser] Connected to user Chrome via --direct, session {}.", id);
-        register_browser_session(claude_session_id, &id);
-        return Ok(id);
-    }
-    eprintln!("[browser] --direct failed. Launching dedicated managed browser for this session...");
+    eprintln!("[browser] No live owned session. Launching managed browser for this session...");
     let exe = ensure_managed_browser()?;
     let port = if let Some(p) = get_session_browser_port(claude_session_id) {
         let direct_arg = format!("--direct=localhost:{}", p);
