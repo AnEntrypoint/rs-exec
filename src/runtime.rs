@@ -440,8 +440,12 @@ fn ensure_managed_browser() -> Result<PathBuf, String> {
     if let Some(exe) = managed_browser_exe() {
         return Ok(exe);
     }
-    eprintln!("[browser] Managed browser not found. Installing Chrome Portable...");
     let install_dir = managed_browser_dir();
+    if install_dir.exists() && install_dir.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false) {
+        eprintln!("[browser] chrome-portable dir exists but is empty, removing for fresh install.");
+        let _ = std::fs::remove_dir_all(&install_dir);
+    }
+    eprintln!("[browser] Managed browser not found. Installing Chrome Portable...");
     std::fs::create_dir_all(&install_dir)
         .map_err(|e| format!("Failed to create install dir: {}", e))?;
 
@@ -546,6 +550,8 @@ fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), Str
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--no-sandbox".into(),
+        "--new-window".into(),
+        "about:blank".into(),
     ];
     if let Some(ext_path) = find_playwriter_extension() {
         eprintln!("[browser] Loading playwriter extension from {}.", ext_path.display());
@@ -555,10 +561,23 @@ fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), Str
     }
     let mut cmd = Command::new(exe);
     cmd.args(&args);
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
     #[cfg(windows)]
-    { cmd.creation_flags(0); }
-    let _child = cmd.spawn().map_err(|e| format!("Failed to launch browser: {}", e))?;
+    { cmd.creation_flags(0x08000000); }
+    let child = cmd.spawn().map_err(|e| format!("Failed to launch browser: {}", e))?;
+    let pid = child.id();
+    eprintln!("[browser] Spawned browser pid {}, verifying port {} responds...", pid, port);
+    for i in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            std::time::Duration::from_millis(200),
+        ).is_ok() {
+            eprintln!("[browser] Port {} responding after {}ms.", port, (i + 1) * 500);
+            return Ok(());
+        }
+    }
+    eprintln!("[browser] WARNING: Port {} not responding after 5s, proceeding anyway (retry loop will handle it).", port);
     Ok(())
 }
 
@@ -650,12 +669,19 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
         }
     }
 
+    let port_open = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(500),
+    ).is_ok();
     Err(format!(
-        "Browser session creation failed after managed browser install and 20 retries on port {}.\n\
-         Check that Chrome Portable installed correctly at: {}\n\
-         Run: plugkit exec browser 'console.log(await page.title())' to retry.",
+        "Browser session creation failed after 20 retries on port {}.\n\
+         Port {} is {}. Chrome exe: {}\n\
+         If port is closed, Chrome likely merged into an existing process or crashed.\n\
+         Try: kill all Chrome processes and retry, or run with a clean profile.",
         port,
-        managed_browser_dir().display()
+        port,
+        if port_open { "OPEN (Chrome running but playwriter can't connect)" } else { "CLOSED (Chrome not listening — process likely exited)" },
+        exe.display()
     ))
 }
 
