@@ -184,12 +184,17 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
                 false
             };
             state.store.delete_task(id);
-            if let Some(ref sid) = session_id {
-                if !sid.is_empty() {
+            let browser_killed = if let Some(ref sid) = session_id {
+                if !sid.is_empty() && state.store.session_task_ids(sid).is_empty() {
                     kill_session_browser(sid);
+                    true
+                } else {
+                    false
                 }
-            }
-            Ok(json!({ "processKilled": process_killed, "browserSessionReleased": session_id.is_some() }))
+            } else {
+                false
+            };
+            Ok(json!({ "processKilled": process_killed, "browserSessionReleased": browser_killed }))
         }
         "listTasks" => {
             let tasks: Vec<Value> = state.store.list_tasks().iter().map(|(id, s)| {
