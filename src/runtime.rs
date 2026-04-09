@@ -157,7 +157,7 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
             } else {
                 let pw_session = get_or_create_browser_session(bin, &args, cwd, session_id)
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
-                args.extend(["-s".into(), pw_session, "-e".into(), code.to_string()]);
+                args.extend(["-s".into(), pw_session, "--timeout".into(), "14000".into(), "-e".into(), code.to_string()]);
             };
             let child = spawn_no_window(Command::new(bin)
                 .args(&args)
@@ -382,8 +382,11 @@ fn managed_browser_exe() -> Option<PathBuf> {
         .or_else(system_chrome_exe)
 }
 
-fn managed_browser_user_data(cwd: &str) -> PathBuf {
-    PathBuf::from(cwd).join(".plugkit-browser-profile")
+fn managed_browser_user_data(session_id: &str) -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
+    PathBuf::from(base).join("plugkit").join("browser-profiles").join(session_id)
 }
 
 fn browser_port_map_file() -> std::path::PathBuf {
@@ -534,8 +537,8 @@ fn find_playwriter_extension() -> Option<std::path::PathBuf> {
     candidates.into_iter().find(|p| p.join("manifest.json").exists())
 }
 
-fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), String> {
-    let user_data = managed_browser_user_data(cwd);
+fn launch_managed_browser(exe: &PathBuf, port: u16, session_id: &str) -> Result<(), String> {
+    let user_data = managed_browser_user_data(session_id);
     kill_stale_managed_browser(&user_data);
     std::thread::sleep(std::time::Duration::from_millis(500));
     for lock_name in &["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"] {
@@ -610,6 +613,23 @@ fn try_new_session(bin: &str, prefix: &[String], cwd: &str, direct_arg: Option<&
     None
 }
 
+fn port_belongs_to_session(port: u16, expected_profile: &std::path::Path) -> bool {
+    let profile_str = expected_profile.to_string_lossy().to_lowercase();
+    let port_arg = format!("--remote-debugging-port={}", port);
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+    for (_pid, proc) in sys.processes() {
+        let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
+        if cmd.iter().any(|a| a.contains(&port_arg)) {
+            let has_profile = cmd.iter().any(|a| a.contains(&profile_str));
+            eprintln!("[browser] Port {} Chrome profile match: {} (expected: {})", port, has_profile, expected_profile.display());
+            return has_profile;
+        }
+    }
+    eprintln!("[browser] No Chrome process found on port {}.", port);
+    false
+}
+
 fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude_session_id: &str) -> Result<String, String> {
     eprintln!("[browser] Checking for existing owned session...");
     let owned_sessions = get_registered_sessions(claude_session_id);
@@ -635,20 +655,23 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
 
     eprintln!("[browser] No live owned session. Launching managed browser for this session...");
     let exe = ensure_managed_browser()?;
+    let expected_profile = managed_browser_user_data(claude_session_id);
     let port = if let Some(p) = get_session_browser_port(claude_session_id) {
-        let direct_arg = format!("--direct=localhost:{}", p);
-        if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
-            eprintln!("[browser] Reconnected to existing session browser on port {}.", p);
-            register_browser_session(claude_session_id, &id);
-            return Ok(id);
+        if port_belongs_to_session(p, &expected_profile) {
+            let direct_arg = format!("--direct=localhost:{}", p);
+            if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
+                eprintln!("[browser] Reconnected to existing session browser on port {}.", p);
+                register_browser_session(claude_session_id, &id);
+                return Ok(id);
+            }
         }
-        eprintln!("[browser] Existing session browser on port {} unreachable, launching new.", p);
+        eprintln!("[browser] Existing session browser on port {} unreachable or belongs to another session, launching new.", p);
         find_free_port(9222)
     } else {
         find_free_port(9222)
     };
 
-    launch_managed_browser(&exe, port, cwd)?;
+    launch_managed_browser(&exe, port, claude_session_id)?;
     set_session_browser_port(claude_session_id, port);
 
     eprintln!("[browser] Waiting for managed browser on port {}...", port);
