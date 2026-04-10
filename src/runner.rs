@@ -164,6 +164,12 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         }
         "getTask" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if !req_sid.is_empty() {
+                if let Some(task_sid) = state.store.get_task_session_id(id) {
+                    if task_sid != req_sid { return Ok(json!({ "task": null })); }
+                }
+            }
             match state.store.get_task_status(id) {
                 None => Ok(json!({ "task": null })),
                 Some((s, r)) => {
@@ -235,12 +241,24 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
         }
         "getAndClearOutput" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if !req_sid.is_empty() {
+                if let Some(task_sid) = state.store.get_task_session_id(id) {
+                    if task_sid != req_sid { return Ok(json!({ "output": [] })); }
+                }
+            }
             let log = state.store.get_and_clear_output(id);
             let entries: Vec<Value> = log.iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
             Ok(json!({ "output": entries }))
         }
         "waitForOutput" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if !req_sid.is_empty() {
+                if let Some(task_sid) = state.store.get_task_session_id(id) {
+                    if task_sid != req_sid { return Ok(json!({ "timedOut": true })); }
+                }
+            }
             let timeout = params["timeoutMs"].as_u64().unwrap_or(30000);
             let timed_out = !state.store.wait_for_output(id, timeout).await;
             Ok(json!({ "timedOut": timed_out }))
