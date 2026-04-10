@@ -623,6 +623,26 @@ fn try_new_session(bin: &str, prefix: &[String], cwd: &str, direct_arg: Option<&
     None
 }
 
+fn profile_active_port(user_data: &std::path::Path) -> Option<u16> {
+    let profile_str = user_data.to_string_lossy().to_lowercase();
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+    for (_pid, proc) in sys.processes() {
+        let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
+        if cmd.iter().any(|a| a.contains("user-data-dir") && a.contains(profile_str.as_str())) {
+            for arg in &cmd {
+                if let Some(rest) = arg.strip_prefix("--remote-debugging-port=") {
+                    if let Ok(p) = rest.parse::<u16>() {
+                        return Some(p);
+                    }
+                }
+            }
+            return Some(0);
+        }
+    }
+    None
+}
+
 fn port_belongs_to_session(port: u16, expected_profile: &std::path::Path) -> bool {
     let profile_str = expected_profile.to_string_lossy().to_lowercase();
     let port_arg = format!("--remote-debugging-port={}", port);
@@ -681,6 +701,26 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
     } else {
         find_free_port(9222)
     };
+
+    if expected_profile.exists() {
+        for wait in 0..30 {
+            match profile_active_port(&expected_profile) {
+                None => break,
+                Some(p) => {
+                    eprintln!("[browser] Profile locked by Chrome on port {} (attempt {}/30), waiting 2s...", p, wait + 1);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+            if wait == 29 {
+                let lock_port = profile_active_port(&expected_profile).unwrap_or(0);
+                return Err(format!(
+                    "Chrome profile locked for 60s. Another Chrome instance is using this profile on port {}. Profile: {}",
+                    lock_port,
+                    expected_profile.display()
+                ));
+            }
+        }
+    }
 
     launch_managed_browser(&exe, port, claude_session_id)?;
     set_session_browser_port(claude_session_id, port);
