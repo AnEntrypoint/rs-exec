@@ -410,6 +410,16 @@ fn set_session_browser_port(claude_session_id: &str, port: u16) {
     let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
 }
 
+fn remove_session_browser_port(claude_session_id: &str) {
+    let path = browser_port_map_file();
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
+            map.remove(claude_session_id);
+            let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
+        }
+    }
+}
+
 pub fn kill_session_browser(claude_session_id: &str) {
     if let Some(port) = get_session_browser_port(claude_session_id) {
         let mut sys = sysinfo::System::new();
@@ -666,6 +676,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
             }
         }
         eprintln!("[browser] Existing session browser on port {} unreachable or belongs to another session, launching new.", p);
+        remove_session_browser_port(claude_session_id);
         find_free_port(9222)
     } else {
         find_free_port(9222)
