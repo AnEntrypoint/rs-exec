@@ -68,7 +68,6 @@ fn strip_quotes(s: &str) -> String {
 }
 
 fn split_playwriter_args(rest: &str) -> Vec<String> {
-    // Find -e and treat everything after it as the JS code (preserve spaces, strip outer quotes)
     if let Some(e_pos) = rest.find(" -e ") {
         let before = &rest[..e_pos];
         let after = rest[e_pos + 4..].trim();
@@ -271,11 +270,9 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: Some(phase) })
         }
         "serial" => {
-            // code = "COM11" or "COM11 115200"
             let mut parts = code.trim().split_whitespace();
             let port_name = parts.next().unwrap_or("COM1");
             let baud: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(115200);
-            // Write a small JS file that reads the serial port and pipes to stdout
             let tmp = tempfile::tempdir()?;
             let script_path = tmp.path().join("serial.mjs");
             let script = format!(
@@ -289,7 +286,6 @@ process.stdin.resume();\n\
 process.stdin.on('data', buf => port.write(buf));\n",
                 port_name, baud, port_name, baud);
             std::fs::write(&script_path, &script)?;
-            // Use node with global serialport
             let global_modules = std::process::Command::new("npm")
                 .args(["root", "-g"])
                 .output()
