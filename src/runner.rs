@@ -348,7 +348,23 @@ async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, run
 fn kill_pid(pid: u32) {
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
-    if let Some(proc) = sys.process(sysinfo::Pid::from_u32(pid)) {
+    let root = sysinfo::Pid::from_u32(pid);
+    let mut descendants: Vec<sysinfo::Pid> = Vec::new();
+    let mut queue: Vec<sysinfo::Pid> = vec![root];
+    while let Some(parent) = queue.pop() {
+        for (child_pid, proc) in sys.processes() {
+            if proc.parent() == Some(parent) {
+                descendants.push(*child_pid);
+                queue.push(*child_pid);
+            }
+        }
+    }
+    for desc in descendants {
+        if let Some(proc) = sys.process(desc) {
+            proc.kill();
+        }
+    }
+    if let Some(proc) = sys.process(root) {
         proc.kill();
     }
 }
