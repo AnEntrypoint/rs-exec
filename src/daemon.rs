@@ -73,17 +73,13 @@ pub fn start(name: &str, exe: &str, args: &[&str]) -> anyhow::Result<u32> {
 
     let pid = child.id();
     fs::write(pid_file(name), pid.to_string())?;
-    std::mem::forget(child);
+    drop(child);
     Ok(pid)
 }
 
 pub fn kill(name: &str) -> bool {
     let Some(pid) = read_pid(name) else { return false };
-    let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
-    if let Some(proc) = sys.process(Pid::from_u32(pid)) {
-        proc.kill();
-    }
+    crate::kill::kill_tree(pid);
     let _ = fs::remove_file(pid_file(name));
     true
 }

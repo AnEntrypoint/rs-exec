@@ -1,6 +1,8 @@
 mod daemon;
 mod background_tasks;
+mod kill;
 mod runtime;
+mod rpc;
 mod runner;
 mod rpc_client;
 
@@ -45,6 +47,7 @@ enum Cmd {
     Runner { sub: String },
     Pm2list,
     #[command(name = "kill-port")] KillPort { port: u16 },
+    #[command(name = "session-cleanup")] SessionCleanup { #[arg(long)] session: String },
 }
 
 async fn ensure_runner() -> anyhow::Result<()> {
@@ -198,6 +201,10 @@ fn print_running_tools() {
 
 #[tokio::main]
 async fn main() {
+    if env::args().any(|a| a == "--exec-process-mode") {
+        rs_exec::run_exec_process();
+        return;
+    }
     if env::args().any(|a| a == "--runner-mode") {
         runner::run_server().await.expect("Runner failed");
         return;
@@ -266,6 +273,11 @@ async fn main() {
                     eprintln!("No process found listening on port {}", port);
                     exit_code = 1;
                 }
+            }
+            Cmd::SessionCleanup { session } => {
+                if session.is_empty() { return Ok(()); }
+                ensure_runner().await?;
+                rpc_client::rpc_call("deleteSessionTasks", json!({ "sessionId": session }), 10000).await?;
             }
             Cmd::Pm2list => {
                 ensure_runner().await?;
