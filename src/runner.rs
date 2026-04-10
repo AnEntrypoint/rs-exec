@@ -136,6 +136,7 @@ async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyh
             };
             for pid in pids { kill_pid(pid); }
             let count = state.store.delete_session_tasks(sid);
+            kill_session_browser(sid);
             Ok(json!({ "deleted": count }))
         }
         "startTask" => {
