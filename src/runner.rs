@@ -1,10 +1,11 @@
 use axum::{routing::{get, post}, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, env, fs, path::PathBuf, process::{ChildStdin, Command, Stdio}, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, env, fs, path::PathBuf, process::ChildStdin, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::net::TcpListener;
 use crate::background_tasks::BackgroundTaskStore;
 use crate::runtime::kill_session_browser;
+use sysinfo::{ProcessesToUpdate, System};
 
 const IDLE_TIMEOUT_SECS: u64 = 15 * 60;
 
@@ -54,7 +55,35 @@ pub struct RpcRequest {
     pub id: Option<Value>,
 }
 
+fn reap_orphaned_exec_processes() {
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, false);
+    let runner_pids: std::collections::HashSet<u32> = sys.processes().values()
+        .filter(|p| {
+            let cmd = p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            cmd.contains("--runner-mode")
+        })
+        .map(|p| p.pid().as_u32())
+        .collect();
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let orphan_pids: Vec<u32> = sys.processes().values()
+        .filter(|p| {
+            let cmd = p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            if !cmd.contains("--exec-process-mode") { return false; }
+            let age = now_secs.saturating_sub(p.start_time());
+            if age < 5 { return false; }
+            let parent = p.parent().map(|pp| pp.as_u32()).unwrap_or(0);
+            !runner_pids.contains(&parent)
+        })
+        .map(|p| p.pid().as_u32())
+        .collect();
+    let count = orphan_pids.len();
+    for pid in orphan_pids { crate::kill::kill_tree(pid); }
+    if count > 0 { eprintln!("[runner] reaped {} orphaned exec-process-mode processes", count); }
+}
+
 pub async fn run_server() -> anyhow::Result<()> {
+    reap_orphaned_exec_processes();
     let store = BackgroundTaskStore::new();
     let state = Arc::new(AppState { store, active: Arc::new(Mutex::new(HashMap::new())) });
     let cleanup_store = state.store.clone();

@@ -1,7 +1,7 @@
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
-use std::{collections::HashMap, process::{ChildStdin, Command, Stdio}, sync::{Arc, Mutex}, env, fs, time::Duration};
-use crate::background_tasks::{BackgroundTaskStore, TaskResult, TaskStatus};
+use std::{collections::HashMap, process::{Command, Stdio}, sync::Arc, env, fs, time::Duration};
+use crate::background_tasks::{TaskResult, TaskStatus};
 use crate::runtime::kill_session_browser;
 use crate::runner::{AppState, touch_session_activity, port_file, self_exe};
 
