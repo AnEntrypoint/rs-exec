@@ -378,11 +378,17 @@ fn managed_browser_exe() -> Option<PathBuf> {
         .or_else(system_chrome_exe)
 }
 
-fn managed_browser_user_data(session_id: &str) -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string());
-    PathBuf::from(base).join("plugkit").join("browser-profiles").join(session_id)
+fn managed_browser_user_data(cwd: &str) -> PathBuf {
+    PathBuf::from(cwd).join(".plugkit-browser-profile")
+}
+
+fn ensure_gitignore_entry(cwd: &str, entry: &str) {
+    let gi = PathBuf::from(cwd).join(".gitignore");
+    let content = std::fs::read_to_string(&gi).unwrap_or_default();
+    if !content.lines().any(|l| l.trim() == entry) {
+        let updated = if content.ends_with('\n') || content.is_empty() { format!("{}{}\n", content, entry) } else { format!("{}\n{}\n", content, entry) };
+        let _ = std::fs::write(&gi, updated);
+    }
 }
 
 fn browser_port_map_file() -> std::path::PathBuf {
@@ -543,8 +549,9 @@ fn find_playwriter_extension() -> Option<std::path::PathBuf> {
     candidates.into_iter().find(|p| p.join("manifest.json").exists())
 }
 
-fn launch_managed_browser(exe: &PathBuf, port: u16, session_id: &str) -> Result<(), String> {
-    let user_data = managed_browser_user_data(session_id);
+fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), String> {
+    let user_data = managed_browser_user_data(cwd);
+    ensure_gitignore_entry(cwd, ".plugkit-browser-profile");
     kill_stale_managed_browser(&user_data);
     std::thread::sleep(std::time::Duration::from_millis(500));
     for lock_name in &["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"] {
@@ -681,7 +688,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
 
     eprintln!("[browser] No live owned session. Launching managed browser for this session...");
     let exe = ensure_managed_browser()?;
-    let expected_profile = managed_browser_user_data(claude_session_id);
+    let expected_profile = managed_browser_user_data(cwd);
     let port = if let Some(p) = get_session_browser_port(claude_session_id) {
         if port_belongs_to_session(p, &expected_profile) {
             let direct_arg = format!("--direct=localhost:{}", p);
@@ -718,7 +725,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
         }
     }
 
-    launch_managed_browser(&exe, port, claude_session_id)?;
+    launch_managed_browser(&exe, port, cwd)?;
     set_session_browser_port(claude_session_id, port);
 
     eprintln!("[browser] Waiting for managed browser on port {}...", port);

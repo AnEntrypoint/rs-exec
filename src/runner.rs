@@ -4,7 +4,6 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, env, fs, path::PathBuf, process::ChildStdin, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::net::TcpListener;
 use crate::background_tasks::BackgroundTaskStore;
-use crate::runtime::kill_session_browser;
 use sysinfo::{ProcessesToUpdate, System};
 
 const IDLE_TIMEOUT_SECS: u64 = 15 * 60;
@@ -31,7 +30,6 @@ fn cleanup_idle_sessions(store: &Arc<BackgroundTaskStore>, active: &Arc<Mutex<Ha
         let pids: Vec<u32> = { let mut a = active.lock().unwrap(); task_ids.iter().filter_map(|id| a.remove(id).map(|(pid, stdin)| { drop(stdin); pid })).collect() };
         for pid in pids { crate::kill::kill_tree(pid); }
         store.delete_session_tasks(sid);
-        kill_session_browser(sid);
     }
     if !dead.is_empty() {
         let mut updated: serde_json::Map<String, Value> = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
