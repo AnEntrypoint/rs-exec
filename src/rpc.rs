@@ -120,7 +120,27 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
     }
 }
 
+fn normalize_cwd(cwd: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(rest) = cwd.strip_prefix('/') {
+            let mut chars = rest.chars();
+            if let Some(drive) = chars.next() {
+                if drive.is_ascii_alphabetic() {
+                    let after = chars.as_str();
+                    if after.is_empty() || after.starts_with('/') {
+                        return format!("{}:{}", drive.to_ascii_uppercase(), after.replace('/', "\\"));
+                    }
+                }
+            }
+        }
+    }
+    cwd.to_string()
+}
+
 async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, runtime: &str, cwd: &str, session_id: &str) -> anyhow::Result<()> {
+    let cwd = normalize_cwd(cwd);
+    let cwd = cwd.as_str();
     let port = fs::read_to_string(port_file())?.trim().parse::<u16>()?;
     let code_file = env::temp_dir().join(format!("rs-exec-code-{}.txt", task_id));
     fs::write(&code_file, code)?;
