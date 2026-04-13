@@ -56,7 +56,8 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
         "getTask" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
             let req_sid = params["sessionId"].as_str().unwrap_or("");
-            if !req_sid.is_empty() { if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({ "task": null })); } } }
+            if req_sid.is_empty() { return Ok(json!({ "task": null })); }
+            if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({ "task": null })); } } else { return Ok(json!({ "task": null })); }
             match state.store.get_task_status(id) {
                 None => Ok(json!({ "task": null })),
                 Some((s, r)) => { let status = match s { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; let result_val = r.map(|r| json!({ "success": r.success, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "exitCode": r.exit_code })); Ok(json!({ "task": { "id": id, "status": status, "result": result_val } })) }
@@ -64,14 +65,24 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
         }
         "deleteTask" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if req_sid.is_empty() { return Ok(json!({ "error": "sessionId required", "processKilled": false, "browserSessionReleased": false })); }
             let session_id = state.store.get_task_session_id(id);
+            if let Some(ref task_sid) = session_id { if task_sid != req_sid { return Ok(json!({ "error": "forbidden", "processKilled": false, "browserSessionReleased": false })); } } else { return Ok(json!({ "error": "task not found", "processKilled": false, "browserSessionReleased": false })); }
             let entry = state.active.lock().unwrap().remove(&id);
             let process_killed = if let Some((pid, stdin)) = entry { drop(stdin); crate::kill::kill_tree(pid); true } else { false };
             state.store.delete_task(id);
             let browser_killed = if let Some(ref sid) = session_id { if !sid.is_empty() && state.store.session_task_ids(sid).is_empty() { kill_session_browser(sid); true } else { false } } else { false };
             Ok(json!({ "processKilled": process_killed, "browserSessionReleased": browser_killed }))
         }
-        "listTasks" => { let tasks: Vec<Value> = state.store.list_tasks().iter().map(|(id, s)| { let status = match s { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; json!({ "id": id, "status": status }) }).collect(); Ok(json!({ "tasks": tasks })) }
+        "listTasks" => {
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if req_sid.is_empty() { return Ok(json!({ "tasks": [] })); }
+            let ids = state.store.session_task_ids(req_sid);
+            let all_tasks = state.store.list_tasks();
+            let tasks: Vec<Value> = all_tasks.iter().filter(|(id, _)| ids.contains(id)).map(|(id, s)| { let status = match s { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; json!({ "id": id, "status": status }) }).collect();
+            Ok(json!({ "tasks": tasks }))
+        }
         "listSessionTasks" => {
             let sid = params["sessionId"].as_str().unwrap_or("");
             let ids = state.store.session_task_ids(sid);
@@ -80,29 +91,48 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             Ok(json!({ "tasks": tasks }))
         }
         "drainSessionOutput" => { let sid = params["sessionId"].as_str().unwrap_or(""); let entries = state.store.drain_session_output(sid); let tasks: Vec<Value> = entries.into_iter().map(|(id, status, output)| { let status_str = match status { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; let out: Vec<Value> = output.into_iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect(); json!({ "id": id, "status": status_str, "output": out }) }).collect(); Ok(json!({ "tasks": tasks })) }
-        "appendOutput" => { state.store.append_output(params["taskId"].as_u64().unwrap_or(0), params["type"].as_str().unwrap_or("stdout"), params["data"].as_str().unwrap_or("")); Ok(json!({})) }
+        "appendOutput" => {
+            let id = params["taskId"].as_u64().unwrap_or(0);
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if req_sid.is_empty() { return Ok(json!({})); }
+            if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({})); } } else { return Ok(json!({})); }
+            state.store.append_output(id, params["type"].as_str().unwrap_or("stdout"), params["data"].as_str().unwrap_or(""));
+            Ok(json!({}))
+        }
         "getAndClearOutput" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
             let req_sid = params["sessionId"].as_str().unwrap_or("");
-            if !req_sid.is_empty() { if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({ "output": [] })); } } }
+            if req_sid.is_empty() { return Ok(json!({ "output": [] })); }
+            if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({ "output": [] })); } } else { return Ok(json!({ "output": [] })); }
             let entries: Vec<Value> = state.store.get_and_clear_output(id).iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
             Ok(json!({ "output": entries }))
         }
         "waitForOutput" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
             let req_sid = params["sessionId"].as_str().unwrap_or("");
-            if !req_sid.is_empty() { if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({ "timedOut": true })); } } }
+            if req_sid.is_empty() { return Ok(json!({ "timedOut": true })); }
+            if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({ "timedOut": true })); } } else { return Ok(json!({ "timedOut": true })); }
             let timed_out = !state.store.wait_for_output(id, params["timeoutMs"].as_u64().unwrap_or(30000)).await;
             Ok(json!({ "timedOut": timed_out }))
         }
         "sendStdin" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if req_sid.is_empty() { return Ok(json!({ "ok": false })); }
+            if let Some(task_sid) = state.store.get_task_session_id(id) { if task_sid != req_sid { return Ok(json!({ "ok": false })); } } else { return Ok(json!({ "ok": false })); }
             let data = params["data"].as_str().unwrap_or("").to_string();
             let mut active = state.active.lock().unwrap();
             let ok = if let Some((_, Some(stdin))) = active.get_mut(&id) { use std::io::Write; stdin.write_all(data.as_bytes()).is_ok() } else { false };
             Ok(json!({ "ok": ok }))
         }
-        "pm2list" => { let active = state.active.lock().unwrap(); let procs: Vec<Value> = active.iter().map(|(id, (pid, _))| json!({ "name": format!("rs-exec-task-{}", id), "status": "online", "pid": pid })).collect(); Ok(json!({ "processes": procs })) }
+        "pm2list" => {
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if req_sid.is_empty() { return Ok(json!({ "processes": [] })); }
+            let session_task_ids = state.store.session_task_ids(req_sid);
+            let active = state.active.lock().unwrap();
+            let procs: Vec<Value> = active.iter().filter(|(id, _)| session_task_ids.contains(id)).map(|(id, (pid, _))| json!({ "name": format!("rs-exec-task-{}", id), "status": "online", "pid": pid })).collect();
+            Ok(json!({ "processes": procs }))
+        }
         "killPort" => {
             let port = params["port"].as_u64().unwrap_or(0) as u16;
             if port == 0 { return Ok(json!({ "ok": false, "error": "port required" })); }
