@@ -17,8 +17,9 @@ fn log_file(name: &str, stream: &str) -> PathBuf {
 
 fn is_alive(pid: u32) -> bool {
     let mut sys = System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
-    sys.process(Pid::from_u32(pid)).is_some()
+    let pid_val = Pid::from_u32(pid);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid_val]), false);
+    sys.process(pid_val).is_some()
 }
 
 fn read_pid(name: &str) -> Option<u32> {
