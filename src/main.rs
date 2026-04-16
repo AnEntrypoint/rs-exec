@@ -278,6 +278,7 @@ async fn main() {
                 if session.is_empty() { return Ok(()); }
                 ensure_runner().await?;
                 rpc_client::rpc_call("deleteSessionTasks", json!({ "sessionId": session }), 10000).await?;
+                runtime::kill_session_browser(&session);
             }
             Cmd::Pm2list => {
                 ensure_runner().await?;
