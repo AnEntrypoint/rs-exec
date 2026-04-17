@@ -123,19 +123,40 @@ pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> 
         }
         "bash" => {
             let tmp = tempfile::tempdir()?;
-            let (cmd, script_content, ext): (&str, String, &str) = if cfg!(windows) {
-                (powershell(), format!("$ErrorActionPreference = 'Continue'\n{}", code), ".ps1")
+            let real_bash_on_win: Option<String> = if cfg!(windows) {
+                which::which("bash").ok().map(|p| p.to_string_lossy().to_string())
+                    .or_else(|| {
+                        let candidates = [
+                            r"C:\Program Files\Git\bin\bash.exe",
+                            r"C:\Program Files\Git\usr\bin\bash.exe",
+                            r"C:\Program Files (x86)\Git\bin\bash.exe",
+                        ];
+                        candidates.iter().find(|p| std::path::Path::new(p).exists()).map(|s| s.to_string())
+                    })
+            } else { None };
+
+            let (cmd, script_content, ext, args): (String, String, &str, Vec<String>) = if cfg!(windows) {
+                if let Some(b) = real_bash_on_win {
+                    let script = tmp.path().join("script.sh");
+                    let content = format!("#!/bin/bash\nset -e\n{}", code);
+                    std::fs::write(&script, &content)?;
+                    (b, content, ".sh", vec![script.to_string_lossy().replace('\\', "/")])
+                } else {
+                    eprintln!("[exec:bash] real bash not found on Windows — falling back to PowerShell. POSIX shell syntax ([ -z ], &&/||, if/then/fi, `command`) will NOT work. Install git-bash or use exec:powershell / exec:nodejs.");
+                    let script = tmp.path().join("script.ps1");
+                    let content = format!("$ErrorActionPreference = 'Continue'\n{}", code);
+                    std::fs::write(&script, &content)?;
+                    (powershell().to_string(), content, ".ps1",
+                     vec!["-NoProfile".into(), "-NonInteractive".into(), "-File".into(), script.to_string_lossy().into()])
+                }
             } else {
-                (bash(), format!("#!/bin/bash\nset -e\n{}", code), ".sh")
+                let script = tmp.path().join("script.sh");
+                let content = format!("#!/bin/bash\nset -e\n{}", code);
+                std::fs::write(&script, &content)?;
+                (bash().to_string(), content, ".sh", vec![script.to_string_lossy().into()])
             };
-            let script = tmp.path().join(format!("script{}", ext));
-            std::fs::write(&script, &script_content)?;
-            let args: Vec<String> = if cfg!(windows) {
-                vec!["-NoProfile".into(), "-NonInteractive".into(), "-File".into(), script.to_string_lossy().into()]
-            } else {
-                vec![script.to_string_lossy().into()]
-            };
-            let child = spawn_no_window(Command::new(cmd).args(&args)
+            let _ = (script_content, ext);
+            let child = spawn_no_window(Command::new(&cmd).args(&args)
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: Some(tmp), compile_phase: None })
         }
