@@ -719,30 +719,21 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                 return Ok(id);
             }
         }
-        eprintln!("[browser] Existing session browser on port {} unreachable or belongs to another session, launching new.", p);
+        eprintln!("[browser] Existing session browser on port {} unreachable or belongs to another session, killing stale processes and launching new.", p);
         remove_session_browser_port(claude_session_id);
+        kill_stale_managed_browser(&expected_profile);
         find_free_port(9222)
     } else {
         find_free_port(9222)
     };
 
     if expected_profile.exists() {
-        for wait in 0..30 {
-            match profile_active_port(&expected_profile) {
-                None => break,
-                Some(p) => {
-                    eprintln!("[browser] Profile locked by Chrome on port {} (attempt {}/30), waiting 2s...", p, wait + 1);
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                }
-            }
-            if wait == 29 {
-                let lock_port = profile_active_port(&expected_profile).unwrap_or(0);
-                return Err(format!(
-                    "Chrome profile locked for 60s. Another Chrome instance is using this profile on port {}. Profile: {}",
-                    lock_port,
-                    expected_profile.display()
-                ));
-            }
+        if profile_active_port(&expected_profile).is_some() {
+            eprintln!("[browser] Profile still active after kill attempt, force-killing...");
+            kill_stale_managed_browser(&expected_profile);
+        }
+        for lock_name in &["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"] {
+            let _ = std::fs::remove_file(expected_profile.join(lock_name));
         }
     }
 
