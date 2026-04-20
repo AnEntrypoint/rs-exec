@@ -139,6 +139,7 @@ pub struct CompilePhase {
 
 
 pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> anyhow::Result<SpawnResult> {
+    ensure_plugkit_gitignore(cwd);
     match runtime {
         "nodejs" | "typescript" => {
             let child = spawn_no_window(Command::new("bun")
@@ -447,13 +448,40 @@ fn managed_browser_user_data(cwd: &str) -> PathBuf {
 }
 
 fn ensure_gitignore_entry(cwd: &str, entry: &str) {
+    ensure_gitignore_entries(cwd, &[entry]);
+}
+
+static GITIGNORE_CHECKED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+
+fn ensure_gitignore_entries(cwd: &str, entries: &[&str]) {
+    let cache = GITIGNORE_CHECKED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    { let g = cache.lock().unwrap(); if g.contains(cwd) { return; } }
     let gi = PathBuf::from(cwd).join(".gitignore");
+    if !PathBuf::from(cwd).join(".git").exists() { cache.lock().unwrap().insert(cwd.to_string()); return; }
     let content = std::fs::read_to_string(&gi).unwrap_or_default();
-    if !content.lines().any(|l| l.trim() == entry) {
-        let updated = if content.ends_with('\n') || content.is_empty() { format!("{}{}\n", content, entry) } else { format!("{}\n{}\n", content, entry) };
+    let existing: std::collections::HashSet<&str> = content.lines().map(|l| l.trim()).collect();
+    let missing: Vec<&str> = entries.iter().copied().filter(|e| !existing.contains(*e)).collect();
+    if !missing.is_empty() {
+        let mut updated = content.clone();
+        if !updated.is_empty() && !updated.ends_with('\n') { updated.push('\n'); }
+        for e in missing { updated.push_str(e); updated.push('\n'); }
         let _ = std::fs::write(&gi, updated);
     }
+    cache.lock().unwrap().insert(cwd.to_string());
 }
+
+pub fn ensure_plugkit_gitignore(cwd: &str) {
+    ensure_gitignore_entries(cwd, PLUGKIT_IGNORE_PATTERNS);
+}
+
+const PLUGKIT_IGNORE_PATTERNS: &[&str] = &[
+    ".plugkit-browser-profile/",
+    ".plugkit-browser-profile-*/",
+    ".plugkit-agent-worktree/",
+    ".code-search/",
+    ".codeinsight",
+    "*.stackdump",
+];
 
 fn browser_port_map_file() -> std::path::PathBuf {
     std::env::temp_dir().join("plugkit-browser-ports.json")
@@ -644,7 +672,7 @@ fn find_playwriter_extension() -> Option<std::path::PathBuf> {
 
 fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), String> {
     let user_data = managed_browser_user_data(cwd);
-    ensure_gitignore_entry(cwd, ".plugkit-browser-profile");
+    ensure_gitignore_entries(cwd, PLUGKIT_IGNORE_PATTERNS);
     kill_stale_managed_browser(&user_data);
     std::thread::sleep(std::time::Duration::from_millis(500));
     for lock_name in &["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"] {
