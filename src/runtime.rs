@@ -46,9 +46,52 @@ fn gpp() -> &'static str { GPP.get_or_init(|| find_bin(&["g++"])) }
 fn java() -> &'static str { JAVA.get_or_init(|| find_bin(&["java"])) }
 fn javac() -> &'static str { JAVAC.get_or_init(|| find_bin(&["javac"])) }
 fn powershell() -> &'static str { POWERSHELL.get_or_init(|| find_bin(&["pwsh", "powershell"])) }
+fn ensure_playwriter() -> Option<PathBuf> {
+    if let Ok(p) = which::which("playwriter") {
+        return Some(p);
+    }
+    eprintln!("[browser] playwriter not found on PATH — installing globally...");
+    let installer = which::which("npm")
+        .or_else(|_| which::which("bun"))
+        .or_else(|_| which::which("pnpm"));
+    let installer = match installer {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("[browser] Neither npm, bun, nor pnpm found — cannot auto-install playwriter.");
+            return None;
+        }
+    };
+    let is_bun = installer.file_stem().and_then(|s| s.to_str()) == Some("bun");
+    let args: Vec<&str> = if is_bun {
+        vec!["add", "-g", "playwriter"]
+    } else {
+        vec!["install", "-g", "playwriter"]
+    };
+    let mut cmd = Command::new(&installer);
+    cmd.args(&args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    { cmd.creation_flags(CREATE_NO_WINDOW); }
+    match cmd.status() {
+        Ok(s) if s.success() => {
+            eprintln!("[browser] playwriter installed via {}.", installer.display());
+            which::which("playwriter").ok()
+        }
+        Ok(s) => {
+            eprintln!("[browser] playwriter install exited with status {}.", s);
+            None
+        }
+        Err(e) => {
+            eprintln!("[browser] playwriter install spawn failed: {}", e);
+            None
+        }
+    }
+}
+
 fn playwriter() -> &'static str {
     PLAYWRITER.get_or_init(|| {
-        if let Ok(p) = which::which("playwriter") {
+        if let Some(p) = ensure_playwriter() {
             let dir = p.parent().unwrap_or(std::path::Path::new("."));
             let bin_js = dir.join("node_modules").join("playwriter").join("bin.js");
             if bin_js.exists() { return bin_js.to_string_lossy().to_string(); }
