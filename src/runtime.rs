@@ -491,12 +491,16 @@ pub fn kill_session_browser(claude_session_id: &str) {
         let mut sys = sysinfo::System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
         let port_arg = format!("--remote-debugging-port={}", port);
-        for (_pid, proc) in sys.processes() {
-            let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
-            if cmd.iter().any(|a| a.contains(port_arg.as_str())) {
-                eprintln!("[browser] Killing idle session browser on port {} for session {}.", port, claude_session_id);
-                proc.kill();
-            }
+        let roots: Vec<u32> = sys.processes().iter()
+            .filter(|(_, proc)| {
+                let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
+                cmd.iter().any(|a| a.contains(port_arg.as_str()))
+            })
+            .map(|(pid, _)| pid.as_u32())
+            .collect();
+        for pid in roots {
+            eprintln!("[browser] Killing idle session browser pid tree {} on port {} for session {}.", pid, port, claude_session_id);
+            crate::kill::kill_tree(pid);
         }
         let port_path = browser_port_map_file();
         if let Ok(s) = std::fs::read_to_string(&port_path) {
@@ -582,12 +586,16 @@ fn kill_stale_managed_browser(user_data: &std::path::Path) {
     let profile_str = user_data.to_string_lossy().to_lowercase();
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
-    for (pid, proc) in sys.processes() {
-        let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
-        if cmd.iter().any(|a| a.contains("user-data-dir") && a.contains(profile_str.as_str())) {
-            eprintln!("[browser] Killing stale managed browser pid {}.", pid);
-            proc.kill();
-        }
+    let roots: Vec<u32> = sys.processes().iter()
+        .filter(|(_, proc)| {
+            let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
+            cmd.iter().any(|a| a.contains("user-data-dir") && a.contains(profile_str.as_str()))
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect();
+    for pid in roots {
+        eprintln!("[browser] Killing stale managed browser pid tree {}.", pid);
+        crate::kill::kill_tree(pid);
     }
     std::thread::sleep(std::time::Duration::from_millis(500));
 }
@@ -644,6 +652,16 @@ fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), Str
     cmd.stdout(Stdio::null()).stderr(Stdio::piped());
     #[cfg(windows)]
     { cmd.creation_flags(0x08000000); }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
+        }
+    }
     let child = cmd.spawn().map_err(|e| format!("Failed to launch browser: {}", e))?;
     let pid = child.id();
     eprintln!("[browser] Spawned browser pid {}, verifying port {} responds...", pid, port);

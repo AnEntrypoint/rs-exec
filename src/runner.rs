@@ -80,8 +80,50 @@ fn reap_orphaned_exec_processes() {
     if count > 0 { eprintln!("[runner] reaped {} orphaned exec-process-mode processes", count); }
 }
 
+fn reap_orphaned_browsers() {
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, false);
+    let runner_pids: std::collections::HashSet<u32> = sys.processes().values()
+        .filter(|p| {
+            let cmd = p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            cmd.contains("--runner-mode")
+        })
+        .map(|p| p.pid().as_u32())
+        .collect();
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let orphan_roots: Vec<u32> = sys.processes().values()
+        .filter(|p| {
+            let cmd = p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            if !cmd.contains(".plugkit-browser-profile") { return false; }
+            let age = now_secs.saturating_sub(p.start_time());
+            if age < 5 { return false; }
+            let parent = p.parent().map(|pp| pp.as_u32()).unwrap_or(0);
+            if runner_pids.contains(&parent) { return false; }
+            let mut pp = p.parent();
+            let mut hops = 0;
+            while let Some(ppid) = pp {
+                if hops > 8 { break; }
+                if let Some(parent_proc) = sys.process(ppid) {
+                    let pcmd = parent_proc.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+                    if pcmd.contains(".plugkit-browser-profile") {
+                        return false;
+                    }
+                    pp = parent_proc.parent();
+                } else { break; }
+                hops += 1;
+            }
+            true
+        })
+        .map(|p| p.pid().as_u32())
+        .collect();
+    let count = orphan_roots.len();
+    for pid in orphan_roots { crate::kill::kill_tree(pid); }
+    if count > 0 { eprintln!("[runner] reaped {} orphaned browser process trees", count); }
+}
+
 pub async fn run_server() -> anyhow::Result<()> {
     reap_orphaned_exec_processes();
+    reap_orphaned_browsers();
     let store = BackgroundTaskStore::new();
     let state = Arc::new(AppState { store, active: Arc::new(Mutex::new(HashMap::new())) });
     let cleanup_store = state.store.clone();
