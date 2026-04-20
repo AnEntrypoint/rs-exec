@@ -498,10 +498,12 @@ pub fn kill_session_browser(claude_session_id: &str) {
             })
             .map(|(pid, _)| pid.as_u32())
             .collect();
+        let killed_any = !roots.is_empty();
         for pid in roots {
             eprintln!("[browser] Killing idle session browser pid tree {} on port {} for session {}.", pid, port, claude_session_id);
             crate::kill::kill_tree(pid);
         }
+        if killed_any { kill_playwriter_ws_server(); }
         let port_path = browser_port_map_file();
         if let Ok(s) = std::fs::read_to_string(&port_path) {
             if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
@@ -593,11 +595,30 @@ fn kill_stale_managed_browser(user_data: &std::path::Path) {
         })
         .map(|(pid, _)| pid.as_u32())
         .collect();
+    let killed_any = !roots.is_empty();
     for pid in roots {
         eprintln!("[browser] Killing stale managed browser pid tree {}.", pid);
         crate::kill::kill_tree(pid);
     }
+    if killed_any { kill_playwriter_ws_server(); }
     std::thread::sleep(std::time::Duration::from_millis(500));
+}
+
+fn kill_playwriter_ws_server() {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
+    let targets: Vec<u32> = sys.processes().iter()
+        .filter(|(_, proc)| {
+            let name = proc.name().to_string_lossy().to_lowercase();
+            let cmd = proc.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            name.contains("playwriter-ws-server") || cmd.contains("start-relay-server.js") || cmd.contains("start-relay-server.ts")
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect();
+    for pid in targets {
+        eprintln!("[browser] Killing stale playwriter-ws-server pid {} (will auto-restart on next use).", pid);
+        crate::kill::kill_tree(pid);
+    }
 }
 
 fn find_playwriter_extension() -> Option<std::path::PathBuf> {

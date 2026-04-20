@@ -119,6 +119,29 @@ fn reap_orphaned_browsers() {
     let count = orphan_roots.len();
     for pid in orphan_roots { crate::kill::kill_tree(pid); }
     if count > 0 { eprintln!("[runner] reaped {} orphaned browser process trees", count); }
+    reap_playwriter_ws_server(&runner_pids);
+}
+
+fn reap_playwriter_ws_server(runner_pids: &std::collections::HashSet<u32>) {
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, false);
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let targets: Vec<u32> = sys.processes().values()
+        .filter(|p| {
+            let name = p.name().to_string_lossy().to_lowercase();
+            let cmd = p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            let is_ws = name.contains("playwriter-ws-server") || cmd.contains("start-relay-server.js") || cmd.contains("start-relay-server.ts");
+            if !is_ws { return false; }
+            let age = now_secs.saturating_sub(p.start_time());
+            if age < 5 { return false; }
+            let parent = p.parent().map(|pp| pp.as_u32()).unwrap_or(0);
+            !runner_pids.contains(&parent)
+        })
+        .map(|p| p.pid().as_u32())
+        .collect();
+    let count = targets.len();
+    for pid in targets { crate::kill::kill_tree(pid); }
+    if count > 0 { eprintln!("[runner] reaped {} orphaned playwriter-ws-server processes (will auto-restart on next use)", count); }
 }
 
 pub async fn run_server() -> anyhow::Result<()> {
