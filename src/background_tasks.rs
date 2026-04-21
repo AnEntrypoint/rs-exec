@@ -100,7 +100,15 @@ impl BackgroundTaskStore {
         let ids: Vec<u64> = { self.tasks.lock().unwrap().values().filter(|t| t.session_id.as_deref() == Some(session_id)).map(|t| t.id).collect() };
         let mut result = Vec::new();
         let mut tasks = self.tasks.lock().unwrap();
-        for id in ids { if let Some(t) = tasks.get_mut(&id) { let output = std::mem::take(&mut t.output_log); result.push((t.id, t.status.clone(), output)); } }
+        for id in ids {
+            if let Some(t) = tasks.get_mut(&id) {
+                let output = match t.status {
+                    TaskStatus::Completed | TaskStatus::Failed => std::mem::take(&mut t.output_log),
+                    TaskStatus::Pending | TaskStatus::Running => Vec::new(),
+                };
+                result.push((t.id, t.status.clone(), output));
+            }
+        }
         result
     }
 
