@@ -535,11 +535,13 @@ fn get_session_browser_port(claude_session_id: &str) -> Option<u16> {
 }
 
 fn set_session_browser_port(claude_session_id: &str, port: u16) {
+    if claude_session_id.is_empty() { return; }
     let path = browser_port_map_file();
     let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    map.remove("");
     map.insert(claude_session_id.to_string(), serde_json::Value::Number(serde_json::Number::from(port)));
     let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
 }
