@@ -15,6 +15,20 @@ fn spawn_no_window(cmd: &mut Command) -> std::io::Result<Child> {
     { cmd.spawn() }
 }
 
+pub fn normalize_cwd(cwd: &str) -> String {
+    if cfg!(windows) {
+        if let Some(rest) = cwd.strip_prefix('/') {
+            let mut chars = rest.chars();
+            if let (Some(drive), Some(sep)) = (chars.next(), chars.next()) {
+                if drive.is_ascii_alphabetic() && sep == '/' {
+                    return format!("{}:/{}", drive.to_ascii_uppercase(), chars.as_str());
+                }
+            }
+        }
+    }
+    cwd.to_string()
+}
+
 fn find_bin(candidates: &[&str]) -> String {
     for &b in candidates {
         if let Ok(path) = which::which(b) {
@@ -138,11 +152,17 @@ pub struct CompilePhase {
 }
 
 
-pub fn spawn_process(runtime: &str, code: &str, cwd: &str, session_id: &str) -> anyhow::Result<SpawnResult> {
+pub fn spawn_process(runtime: &str, code: &str, cwd_raw: &str, session_id: &str) -> anyhow::Result<SpawnResult> {
+    let cwd_owned = normalize_cwd(cwd_raw);
+    let cwd = cwd_owned.as_str();
     ensure_plugkit_gitignore(cwd);
     match runtime {
         "nodejs" | "typescript" => {
-            let child = spawn_no_window(Command::new("bun")
+            let bun_bin = which::which("bun.exe")
+                .or_else(|_| which::which("bun"))
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "bun".to_string());
+            let child = spawn_no_window(Command::new(&bun_bin)
                 .args(["-e", code])
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
