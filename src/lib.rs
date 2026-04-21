@@ -6,6 +6,68 @@ pub mod rpc_client;
 pub mod runner;
 pub mod runtime;
 
+pub fn install_broken_pipe_handler() {
+    use std::io::Write;
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info.payload().downcast_ref::<String>().map(|s| s.as_str())
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        let loc = info.location().map(|l| l.file()).unwrap_or("");
+        let is_stdio_panic = msg.contains("failed printing to stdout")
+            || msg.contains("failed printing to stderr")
+            || loc.ends_with("io/stdio.rs") || loc.ends_with("io\\stdio.rs");
+        if is_stdio_panic {
+            let _ = std::io::stderr().flush();
+            std::process::exit(0);
+        }
+        default(info);
+    }));
+}
+
+fn write_or_exit(target: &mut dyn std::io::Write, s: &str) {
+    use std::io::ErrorKind;
+    match target.write_all(s.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => std::process::exit(0),
+        Err(_) => std::process::exit(0),
+    }
+}
+
+pub fn safe_print(s: &str) {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    write_or_exit(&mut lock, s);
+}
+
+pub fn safe_eprint(s: &str) {
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    write_or_exit(&mut lock, s);
+}
+
+#[macro_export]
+macro_rules! sprintln {
+    () => { $crate::safe_print("\n") };
+    ($($arg:tt)*) => { $crate::safe_print(&format!("{}\n", format_args!($($arg)*))) };
+}
+
+#[macro_export]
+macro_rules! sprint {
+    ($($arg:tt)*) => { $crate::safe_print(&format!("{}", format_args!($($arg)*))) };
+}
+
+#[macro_export]
+macro_rules! seprintln {
+    () => { $crate::safe_eprint("\n") };
+    ($($arg:tt)*) => { $crate::safe_eprint(&format!("{}\n", format_args!($($arg)*))) };
+}
+
+#[macro_export]
+macro_rules! seprint {
+    ($($arg:tt)*) => { $crate::safe_eprint(&format!("{}", format_args!($($arg)*))) };
+}
+
 pub fn run_exec_process() {
     use std::io::{Read, Write};
     use std::net::TcpStream;

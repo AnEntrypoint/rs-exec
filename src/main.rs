@@ -201,6 +201,7 @@ fn print_running_tools() {
 
 #[tokio::main]
 async fn main() {
+    rs_exec::install_broken_pipe_handler();
     if env::args().any(|a| a == "--exec-process-mode") {
         rs_exec::run_exec_process();
         return;
