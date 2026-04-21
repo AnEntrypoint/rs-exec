@@ -27,6 +27,7 @@ anyhow = "1"
 which = "8.0.2"
 sysinfo = "0.33.1"
 shlex = "1"
+fs2 = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

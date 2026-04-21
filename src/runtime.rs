@@ -444,7 +444,47 @@ fn managed_browser_exe() -> Option<PathBuf> {
 }
 
 fn managed_browser_user_data(cwd: &str) -> PathBuf {
-    PathBuf::from(cwd).join(".plugkit-browser-profile")
+    acquire_profile_dir(cwd)
+}
+
+static PROFILE_LOCKS: std::sync::OnceLock<std::sync::Mutex<Vec<std::fs::File>>> = std::sync::OnceLock::new();
+static PROFILE_CHOICE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, PathBuf>>> = std::sync::OnceLock::new();
+
+fn acquire_profile_dir(cwd: &str) -> PathBuf {
+    let choices = PROFILE_CHOICE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    {
+        let guard = choices.lock().unwrap();
+        if let Some(p) = guard.get(cwd) { return p.clone(); }
+    }
+    use fs2::FileExt;
+    let shared = PathBuf::from(cwd).join(".plugkit-browser-profile");
+    let _ = std::fs::create_dir_all(&shared);
+    let shared_lock_path = shared.join(".rs-exec.lock");
+    let chosen = match std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&shared_lock_path) {
+        Ok(f) => {
+            match f.try_lock_exclusive() {
+                Ok(()) => {
+                    PROFILE_LOCKS.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().push(f);
+                    shared
+                }
+                Err(_) => {
+                    let pid = std::process::id();
+                    let per_agent = PathBuf::from(cwd).join(format!(".plugkit-browser-profile-{}", pid));
+                    let _ = std::fs::create_dir_all(&per_agent);
+                    eprintln!("[browser] Shared profile in use by another runner; isolating this agent to {}.", per_agent.display());
+                    if let Ok(f2) = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(per_agent.join(".rs-exec.lock")) {
+                        let _ = f2.try_lock_exclusive();
+                        PROFILE_LOCKS.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().push(f2);
+                    }
+                    ensure_gitignore_entry(cwd, &format!(".plugkit-browser-profile-{}", pid));
+                    per_agent
+                }
+            }
+        }
+        Err(_) => shared,
+    };
+    choices.lock().unwrap().insert(cwd.to_string(), chosen.clone());
+    chosen
 }
 
 fn ensure_gitignore_entry(cwd: &str, entry: &str) {
