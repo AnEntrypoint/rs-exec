@@ -161,12 +161,17 @@ pub async fn run_server() -> anyhow::Result<()> {
         loop { interval.tick().await; cleanup_idle_sessions(&idle_state.store, &idle_state.active); }
     });
     let app = Router::new().route("/health", get(crate::rpc::health)).route("/rpc", post(crate::rpc::rpc_handler)).with_state(state);
-    const FIXED_PORT: u16 = 32882;
-    for attempt in 0..5 {
-        match TcpListener::bind(format!("127.0.0.1:{}", FIXED_PORT)).await {
-            Ok(listener) => { fs::write(port_file(), FIXED_PORT.to_string())?; eprintln!("[runner] listening on port {}", FIXED_PORT); axum::serve(listener, app).await?; return Ok(()); }
-            Err(_) => { if attempt < 4 { tokio::time::sleep(std::time::Duration::from_millis(500)).await; } }
+    const PREFERRED_PORT: u16 = 32882;
+    let listener = match TcpListener::bind(format!("127.0.0.1:{}", PREFERRED_PORT)).await {
+        Ok(l) => { fs::write(port_file(), PREFERRED_PORT.to_string())?; eprintln!("[runner] listening on port {}", PREFERRED_PORT); l }
+        Err(_) => {
+            let l = TcpListener::bind("127.0.0.1:0").await?;
+            let port = l.local_addr()?.port();
+            fs::write(port_file(), port.to_string())?;
+            eprintln!("[runner] preferred port {} unavailable, listening on ephemeral port {}", PREFERRED_PORT, port);
+            l
         }
-    }
-    Err(anyhow::anyhow!("Could not bind port {} after retries", FIXED_PORT))
+    };
+    axum::serve(listener, app).await?;
+    Ok(())
 }
