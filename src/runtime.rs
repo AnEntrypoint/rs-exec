@@ -632,6 +632,45 @@ fn kill_stale_managed_browser(user_data: &std::path::Path) {
     std::thread::sleep(std::time::Duration::from_millis(500));
 }
 
+fn sanitize_chrome_exit_state(user_data: &std::path::Path) {
+    let default_dir = user_data.join("Default");
+    for stale in &["Last Session", "Last Tabs", "Current Session", "Current Tabs"] {
+        let _ = std::fs::remove_file(default_dir.join(stale));
+    }
+    let prefs_path = default_dir.join("Preferences");
+    if let Ok(content) = std::fs::read_to_string(&prefs_path) {
+        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(obj) = json.as_object_mut() {
+                let profile = obj.entry("profile").or_insert_with(|| serde_json::json!({}));
+                if let Some(profile_obj) = profile.as_object_mut() {
+                    profile_obj.insert("exit_type".into(), serde_json::json!("Normal"));
+                    profile_obj.insert("exited_cleanly".into(), serde_json::json!(true));
+                }
+            }
+            if let Ok(out) = serde_json::to_string(&json) {
+                let _ = std::fs::write(&prefs_path, out);
+            }
+        }
+    }
+    let local_state_path = user_data.join("Local State");
+    if let Ok(content) = std::fs::read_to_string(&local_state_path) {
+        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(obj) = json.as_object_mut() {
+                let user_exp = obj.entry("user_experience_metrics").or_insert_with(|| serde_json::json!({}));
+                if let Some(ue) = user_exp.as_object_mut() {
+                    let stab = ue.entry("stability").or_insert_with(|| serde_json::json!({}));
+                    if let Some(stab_obj) = stab.as_object_mut() {
+                        stab_obj.insert("exited_cleanly".into(), serde_json::json!(true));
+                    }
+                }
+            }
+            if let Ok(out) = serde_json::to_string(&json) {
+                let _ = std::fs::write(&local_state_path, out);
+            }
+        }
+    }
+}
+
 fn kill_playwriter_ws_server() {
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
@@ -680,6 +719,7 @@ fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), Str
     }
     std::fs::create_dir_all(&user_data)
         .map_err(|e| format!("Failed to create browser profile dir: {}", e))?;
+    sanitize_chrome_exit_state(&user_data);
     eprintln!("[browser] Launching managed browser on port {}...", port);
     let mut args: Vec<String> = vec![
         format!("--remote-debugging-port={}", port),
@@ -687,6 +727,9 @@ fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), Str
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--no-sandbox".into(),
+        "--hide-crash-restore-bubble".into(),
+        "--disable-session-crashed-bubble".into(),
+        "--disable-features=InfiniteSessionRestore".into(),
         "--new-window".into(),
         "about:blank".into(),
     ];
