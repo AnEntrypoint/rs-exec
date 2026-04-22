@@ -183,9 +183,9 @@ async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, run
     env_vars.insert("CODE_FILE".into(), code_file.to_string_lossy().to_string());
     if !session_id.is_empty() { env_vars.insert("SESSION_ID".into(), session_id.to_string()); }
     #[cfg(windows)]
-    let mut child = { use std::os::windows::process::CommandExt; Command::new(self_exe()).arg("--exec-process-mode").envs(&env_vars).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(0x08000000).spawn()? };
+    let mut child = { use std::os::windows::process::CommandExt; Command::new(self_exe()).arg("--exec-process-mode").envs(&env_vars).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x08000000).spawn()? };
     #[cfg(not(windows))]
-    let mut child = Command::new(self_exe()).arg("--exec-process-mode").envs(&env_vars).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = Command::new(self_exe()).arg("--exec-process-mode").envs(&env_vars).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
     let pid = child.id();
     let stdin = child.stdin.take();
     state.active.lock().unwrap().insert(task_id, (pid, stdin));
