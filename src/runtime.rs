@@ -952,32 +952,59 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
         }
     }
 
-    launch_managed_browser(&exe, port, cwd)?;
-    set_session_browser_port(claude_session_id, port);
+    let mut current_port = port;
+    for outer in 0..3 {
+        if outer > 0 {
+            eprintln!("[browser] Outer retry {} — full reset (kill + fresh port + clean profile + relaunch).", outer);
+            kill_stale_managed_browser(&expected_profile);
+            kill_playwriter_ws_server();
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            for lock_name in &["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"] {
+                let _ = std::fs::remove_file(expected_profile.join(lock_name));
+            }
+            current_port = find_free_port(current_port + 1);
+        }
+        launch_managed_browser(&exe, current_port, cwd)?;
+        set_session_browser_port(claude_session_id, current_port);
 
-    eprintln!("[browser] Waiting for managed browser on port {}...", port);
-    let direct_arg = format!("--direct=localhost:{}", port);
-    for attempt in 0..20 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        eprintln!("[browser] Retry {} — connecting to managed browser...", attempt + 1);
-        if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
-            eprintln!("[browser] Session {} created via managed browser on port {}.", id, port);
+        eprintln!("[browser] Waiting for managed browser on port {}...", current_port);
+        let direct_arg = format!("--direct=localhost:{}", current_port);
+        let mut got_session: Option<String> = None;
+        for attempt in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            eprintln!("[browser] Retry {} — connecting to managed browser...", attempt + 1);
+            if let Some(id) = try_new_session(bin, prefix, cwd, Some(&direct_arg)) {
+                got_session = Some(id);
+                break;
+            }
+            let port_alive = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], current_port)),
+                std::time::Duration::from_millis(200),
+            ).is_ok();
+            if !port_alive && attempt >= 4 {
+                eprintln!("[browser] Port {} died mid-retry — breaking inner loop for outer reset.", current_port);
+                break;
+            }
+        }
+        if let Some(id) = got_session {
+            eprintln!("[browser] Session {} created via managed browser on port {}.", id, current_port);
             register_browser_session(claude_session_id, &id);
             return Ok(id);
         }
+        eprintln!("[browser] Outer attempt {} failed on port {}.", outer + 1, current_port);
     }
 
     let port_open = std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        &std::net::SocketAddr::from(([127, 0, 0, 1], current_port)),
         std::time::Duration::from_millis(500),
     ).is_ok();
     Err(format!(
-        "Browser session creation failed after 20 retries on port {}.\n\
+        "Browser session creation failed after 3 outer attempts (60+ retries total) on port {}.\n\
          Port {} is {}. Chrome exe: {}\n\
          If port is closed, Chrome likely merged into an existing process or crashed.\n\
          Try: kill all Chrome processes and retry, or run with a clean profile.",
-        port,
-        port,
+        current_port,
+        current_port,
         if port_open { "OPEN (Chrome running but playwriter can't connect)" } else { "CLOSED (Chrome not listening — process likely exited)" },
         exe.display()
     ))
