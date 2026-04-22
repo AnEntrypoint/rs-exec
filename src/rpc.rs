@@ -72,8 +72,8 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let entry = state.active.lock().unwrap().remove(&id);
             let process_killed = if let Some((pid, stdin)) = entry { drop(stdin); crate::kill::kill_tree(pid); true } else { false };
             state.store.delete_task(id);
-            let browser_killed = if let Some(ref sid) = session_id { if !sid.is_empty() && state.store.session_task_ids(sid).is_empty() { kill_session_browser(sid); true } else { false } } else { false };
-            Ok(json!({ "processKilled": process_killed, "browserSessionReleased": browser_killed }))
+            let _ = session_id;
+            Ok(json!({ "processKilled": process_killed, "browserSessionReleased": false }))
         }
         "listTasks" => {
             let req_sid = params["sessionId"].as_str().unwrap_or("");
