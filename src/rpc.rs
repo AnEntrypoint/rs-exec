@@ -2,7 +2,7 @@ use axum::{extract::State, Json};
 use serde_json::{json, Value};
 use std::{collections::HashMap, process::{Command, Stdio}, sync::Arc, env, fs, time::Duration};
 use crate::background_tasks::{TaskResult, TaskStatus};
-use crate::runtime::{kill_session_browser, normalize_cwd};
+use crate::runtime::{kill_session_browser, normalize_cwd, resolve_valid_cwd};
 use crate::runner::{AppState, touch_session_activity, port_file, self_exe};
 
 pub async fn health() -> Json<Value> { Json(json!({ "ok": true })) }
@@ -185,7 +185,8 @@ fn cleanup_session_temp_files(session_id: &str) {
 }
 
 async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, runtime: &str, cwd: &str, session_id: &str) -> anyhow::Result<()> {
-    let cwd = normalize_cwd(cwd);
+    let cwd_normalized = normalize_cwd(cwd);
+    let cwd = resolve_valid_cwd(&cwd_normalized);
     let cwd = cwd.as_str();
     let port = fs::read_to_string(port_file())?.trim().parse::<u16>()?;
     let code_file = env::temp_dir().join(format!("rs-exec-code-{}.txt", task_id));

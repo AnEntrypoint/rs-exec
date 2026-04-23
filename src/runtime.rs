@@ -33,6 +33,17 @@ pub fn normalize_cwd(cwd: &str) -> String {
     cwd.to_string()
 }
 
+pub fn resolve_valid_cwd(cwd: &str) -> String {
+    let p = std::path::Path::new(cwd);
+    if !cwd.is_empty() && p.is_dir() { return cwd.to_string(); }
+    let fallback = std::env::current_dir()
+        .ok()
+        .map(|d| normalize_cwd(&d.to_string_lossy()))
+        .unwrap_or_else(|| ".".to_string());
+    eprintln!("[runtime] cwd {:?} invalid, falling back to {:?}", cwd, fallback);
+    fallback
+}
+
 #[cfg(test)]
 mod normalize_cwd_tests {
     use super::normalize_cwd;
@@ -197,7 +208,8 @@ pub struct CompilePhase {
 
 
 pub fn spawn_process(runtime: &str, code: &str, cwd_raw: &str, session_id: &str) -> anyhow::Result<SpawnResult> {
-    let cwd_owned = normalize_cwd(cwd_raw);
+    let cwd_normalized = normalize_cwd(cwd_raw);
+    let cwd_owned = resolve_valid_cwd(&cwd_normalized);
     let cwd = cwd_owned.as_str();
     ensure_plugkit_gitignore(cwd);
     match runtime {
