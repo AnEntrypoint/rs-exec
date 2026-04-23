@@ -2,7 +2,7 @@ use axum::{extract::State, Json};
 use serde_json::{json, Value};
 use std::{collections::HashMap, process::{Command, Stdio}, sync::Arc, env, fs, time::Duration};
 use crate::background_tasks::{TaskResult, TaskStatus};
-use crate::runtime::kill_session_browser;
+use crate::runtime::{kill_session_browser, normalize_cwd};
 use crate::runner::{AppState, touch_session_activity, port_file, self_exe};
 
 pub async fn health() -> Json<Value> { Json(json!({ "ok": true })) }
@@ -149,24 +149,6 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
         "shutdown" => { tokio::spawn(async { tokio::time::sleep(Duration::from_millis(100)).await; std::process::exit(0); }); Ok(json!({ "ok": true })) }
         _ => Err(anyhow::anyhow!("Unknown method: {}", method))
     }
-}
-
-fn normalize_cwd(cwd: &str) -> String {
-    #[cfg(windows)]
-    {
-        if let Some(rest) = cwd.strip_prefix('/') {
-            let mut chars = rest.chars();
-            if let Some(drive) = chars.next() {
-                if drive.is_ascii_alphabetic() {
-                    let after = chars.as_str();
-                    if after.is_empty() || after.starts_with('/') {
-                        return format!("{}:{}", drive.to_ascii_uppercase(), after.replace('/', "\\"));
-                    }
-                }
-            }
-        }
-    }
-    cwd.to_string()
 }
 
 fn cleanup_session_temp_files(session_id: &str) {

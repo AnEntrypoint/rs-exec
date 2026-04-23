@@ -16,17 +16,61 @@ fn spawn_no_window(cmd: &mut Command) -> std::io::Result<Child> {
 }
 
 pub fn normalize_cwd(cwd: &str) -> String {
-    if cfg!(windows) {
-        if let Some(rest) = cwd.strip_prefix('/') {
-            let mut chars = rest.chars();
-            if let (Some(drive), Some(sep)) = (chars.next(), chars.next()) {
-                if drive.is_ascii_alphabetic() && sep == '/' {
-                    return format!("{}:/{}", drive.to_ascii_uppercase(), chars.as_str());
-                }
+    if !cfg!(windows) { return cwd.to_string(); }
+    if let Some(rest) = cwd.strip_prefix('/') {
+        let mut chars = rest.chars();
+        if let (Some(drive), Some(sep)) = (chars.next(), chars.next()) {
+            if drive.is_ascii_alphabetic() && sep == '/' {
+                return format!("{}:/{}", drive.to_ascii_uppercase(), chars.as_str());
             }
         }
     }
+    if cwd.len() >= 3 && cwd.as_bytes()[1] == b':' && (cwd.as_bytes()[2] == b'\\' || cwd.as_bytes()[2] == b'/') {
+        let drive = cwd.chars().next().unwrap().to_ascii_uppercase();
+        let rest: String = cwd[2..].chars().map(|c| if c == '\\' { '/' } else { c }).collect();
+        return format!("{}{}", drive, rest);
+    }
     cwd.to_string()
+}
+
+#[cfg(test)]
+mod normalize_cwd_tests {
+    use super::normalize_cwd;
+
+    #[cfg(windows)]
+    #[test]
+    fn msys_style_is_converted() {
+        assert_eq!(normalize_cwd("/c/dev/rs-exec"), "C:/dev/rs-exec");
+        assert_eq!(normalize_cwd("/C/dev"), "C:/dev");
+        assert_eq!(normalize_cwd("/d/projects/foo"), "D:/projects/foo");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_style_is_normalized_case_and_slash() {
+        assert_eq!(normalize_cwd("c:\\dev\\rs-exec"), "C:/dev/rs-exec");
+        assert_eq!(normalize_cwd("C:/dev/foo"), "C:/dev/foo");
+        assert_eq!(normalize_cwd("C:\\"), "C:/");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_drive_paths_pass_through() {
+        assert_eq!(normalize_cwd("/home/user"), "/home/user");
+        assert_eq!(normalize_cwd(""), "");
+        assert_eq!(normalize_cwd("relative/path"), "relative/path");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn roundtrip_idempotent() {
+        let cases = ["/c/dev/foo", "C:\\dev\\foo", "C:/dev/foo", "c:/dev/FOO"];
+        for c in cases {
+            let once = normalize_cwd(c);
+            let twice = normalize_cwd(&once);
+            assert_eq!(once, twice, "idempotence broken on {:?}", c);
+        }
+    }
 }
 
 fn find_bin(candidates: &[&str]) -> String {
@@ -946,8 +990,31 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                     .collect();
                 for id in &owned_sessions {
                     if live_ids.contains(id) {
-                        eprintln!("[browser] Reusing owned session {}.", id);
-                        return Ok(id.clone());
+                        let mut probe_args: Vec<String> = prefix.to_vec();
+                        probe_args.extend(["-s".into(), id.clone(), "--timeout".into(), "3000".into(), "-e".into(), "1".into()]);
+                        let probe_ok = Command::new(bin).args(&probe_args).current_dir(cwd)
+                            .stdout(Stdio::piped()).stderr(Stdio::piped())
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+                        if probe_ok {
+                            eprintln!("[browser] Reusing owned session {} (liveness probe OK).", id);
+                            return Ok(id.clone());
+                        } else {
+                            eprintln!("[browser] Owned session {} listed but liveness probe failed (stale CDP UUID?); evicting.", id);
+                            let mut del_args: Vec<String> = prefix.to_vec();
+                            del_args.extend(["session".into(), "delete".into(), id.clone()]);
+                            let _ = Command::new(bin).args(&del_args).current_dir(cwd)
+                                .stdout(Stdio::null()).stderr(Stdio::null()).output();
+                            let path = browser_session_map_file();
+                            if let Ok(s) = std::fs::read_to_string(&path) {
+                                if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
+                                    map.remove(claude_session_id);
+                                    let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
+                                }
+                            }
+                            kill_playwriter_ws_server();
+                        }
                     }
                 }
             }
