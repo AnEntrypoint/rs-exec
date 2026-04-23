@@ -132,3 +132,57 @@ impl BackgroundTaskStore {
         self.tasks.lock().unwrap().retain(|_, t| t.completed_at.map(|c| c.elapsed() < max_age).unwrap_or(true));
     }
 }
+
+#[cfg(test)]
+mod session_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn session_task_ids_filters_by_session() {
+        let s = BackgroundTaskStore::new();
+        let a1 = s.create_task(); s.set_session_id(a1, "session-A");
+        let a2 = s.create_task(); s.set_session_id(a2, "session-A");
+        let b1 = s.create_task(); s.set_session_id(b1, "session-B");
+        let none = s.create_task();
+
+        let mut a_ids = s.session_task_ids("session-A");
+        a_ids.sort();
+        assert_eq!(a_ids, vec![a1, a2]);
+
+        assert_eq!(s.session_task_ids("session-B"), vec![b1]);
+        assert!(s.session_task_ids("session-C").is_empty());
+        assert!(s.session_task_ids("").is_empty());
+        let _ = none;
+    }
+
+    #[test]
+    fn delete_session_tasks_only_affects_target_session() {
+        let s = BackgroundTaskStore::new();
+        let a1 = s.create_task(); s.set_session_id(a1, "A");
+        let a2 = s.create_task(); s.set_session_id(a2, "A");
+        let b1 = s.create_task(); s.set_session_id(b1, "B");
+
+        let deleted = s.delete_session_tasks("A");
+        assert_eq!(deleted, 2);
+        assert!(s.session_task_ids("A").is_empty());
+        assert_eq!(s.session_task_ids("B"), vec![b1]);
+    }
+
+    #[test]
+    fn delete_session_tasks_on_empty_session_is_zero() {
+        let s = BackgroundTaskStore::new();
+        let t = s.create_task(); s.set_session_id(t, "real");
+        assert_eq!(s.delete_session_tasks("nonexistent"), 0);
+        assert_eq!(s.session_task_ids("real"), vec![t]);
+    }
+
+    #[test]
+    fn tasks_without_session_are_not_leaked_cross_session() {
+        let s = BackgroundTaskStore::new();
+        let orphan = s.create_task();
+        let owned = s.create_task(); s.set_session_id(owned, "X");
+        assert!(!s.session_task_ids("X").contains(&orphan));
+        assert!(!s.session_task_ids("").contains(&orphan));
+        assert!(!s.session_task_ids("").contains(&owned));
+    }
+}
