@@ -28,7 +28,7 @@ pub fn normalize_cwd(cwd: &str) -> String {
     if cwd.len() >= 3 && cwd.as_bytes()[1] == b':' && (cwd.as_bytes()[2] == b'\\' || cwd.as_bytes()[2] == b'/') {
         let drive = cwd.chars().next().unwrap().to_ascii_uppercase();
         let rest: String = cwd[2..].chars().map(|c| if c == '\\' { '/' } else { c }).collect();
-        return format!("{}{}", drive, rest);
+        return format!("{}:{}", drive, rest);
     }
     cwd.to_string()
 }
