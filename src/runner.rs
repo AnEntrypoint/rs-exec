@@ -163,15 +163,26 @@ pub async fn run_server() -> anyhow::Result<()> {
     let app = Router::new().route("/health", get(crate::rpc::health)).route("/rpc", post(crate::rpc::rpc_handler)).with_state(state);
     const PREFERRED_PORT: u16 = 32882;
     let listener = match TcpListener::bind(format!("127.0.0.1:{}", PREFERRED_PORT)).await {
-        Ok(l) => { fs::write(port_file(), PREFERRED_PORT.to_string())?; eprintln!("[runner] listening on port {}", PREFERRED_PORT); l }
-        Err(_) => {
+        Ok(l) => {
+            fs::write(port_file(), PREFERRED_PORT.to_string())?;
+            eprintln!("[DAEMON:fsm] Listening {{ port: {}, branch: fixed }}", PREFERRED_PORT);
+            l
+        }
+        Err(e) => {
             let l = TcpListener::bind("127.0.0.1:0").await?;
             let port = l.local_addr()?.port();
             fs::write(port_file(), port.to_string())?;
-            eprintln!("[runner] preferred port {} unavailable, listening on ephemeral port {}", PREFERRED_PORT, port);
+            eprintln!("[DAEMON:fsm] Listening {{ port: {}, branch: fallback, reason: {} }}", port, e);
             l
         }
     };
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app).await;
+    if let Err(e) = &serve_result {
+        let crash_path = env::temp_dir().join("rs-exec-daemon-crash.log");
+        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let _ = fs::write(&crash_path, format!("ts={}\npid={}\nreason={}\n", ts, std::process::id(), e));
+        eprintln!("[DAEMON:fsm] Crashed {{ reason: {}, written_to: {} }}", e, crash_path.display());
+    }
+    serve_result?;
     Ok(())
 }

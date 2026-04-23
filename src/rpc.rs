@@ -43,6 +43,7 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             for pid in pids { crate::kill::kill_tree(pid); }
             let count = state.store.delete_session_tasks(sid);
             kill_session_browser(sid);
+            cleanup_session_temp_files(sid);
             Ok(json!({ "deleted": count }))
         }
         "startTask" => { state.store.start_task(params["taskId"].as_u64().unwrap_or(0)); Ok(json!({})) }
@@ -166,6 +167,39 @@ fn normalize_cwd(cwd: &str) -> String {
         }
     }
     cwd.to_string()
+}
+
+fn cleanup_session_temp_files(session_id: &str) {
+    let tmp = env::temp_dir();
+    let patterns = [
+        format!("rs-exec-code-{}-", session_id),
+        format!("plugkit-exec-{}-", session_id),
+    ];
+    let Ok(entries) = fs::read_dir(&tmp) else { return };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else { continue };
+        let starts_match = patterns.iter().any(|p| name.starts_with(p.as_str()));
+        let generic_match = name.starts_with("rs-exec-code-") || name.starts_with("plugkit-exec-");
+        if starts_match {
+            let _ = fs::remove_file(entry.path());
+            removed += 1;
+        } else if generic_match {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mt) = meta.modified() {
+                    if let Ok(age) = std::time::SystemTime::now().duration_since(mt) {
+                        if age.as_secs() > 3600 {
+                            let _ = fs::remove_file(entry.path());
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("[SESSION:fsm] Dead {{ sid: {}, temp_files_removed: {} }}", session_id, removed);
+    }
 }
 
 async fn spawn_exec_process(state: &Arc<AppState>, task_id: u64, code: &str, runtime: &str, cwd: &str, session_id: &str) -> anyhow::Result<()> {
