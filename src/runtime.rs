@@ -816,7 +816,7 @@ fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), Str
             });
         }
     }
-    let child = cmd.spawn().map_err(|e| format!("Failed to launch browser: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to launch browser: {}", e))?;
     let pid = child.id();
     eprintln!("[browser] Spawned browser pid {}, verifying port {} responds...", pid, port);
     for i in 0..10 {
@@ -827,6 +827,19 @@ fn launch_managed_browser(exe: &PathBuf, port: u16, cwd: &str) -> Result<(), Str
         ).is_ok() {
             eprintln!("[browser] Port {} responding after {}ms.", port, (i + 1) * 500);
             return Ok(());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            let mut stderr_buf = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                use std::io::Read;
+                let _ = s.read_to_string(&mut stderr_buf);
+            }
+            return Err(format!(
+                "Browser exited early with status {} before port {} came up.\nChrome stderr:\n{}",
+                status,
+                port,
+                stderr_buf.lines().take(30).collect::<Vec<_>>().join("\n")
+            ));
         }
     }
     eprintln!("[browser] WARNING: Port {} not responding after 5s, proceeding anyway (retry loop will handle it).", port);
@@ -903,20 +916,39 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
     eprintln!("[browser] Checking for existing owned session...");
     let owned_sessions = get_registered_sessions(claude_session_id);
     if !owned_sessions.is_empty() {
-        let mut list_args: Vec<String> = prefix.to_vec();
-        list_args.extend(["session".into(), "list".into()]);
-        if let Ok(out) = Command::new(bin).args(&list_args).current_dir(cwd)
-            .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
-        {
-            let list = String::from_utf8_lossy(&out.stdout);
-            let live_ids: Vec<String> = list.lines()
-                .filter_map(|line| line.trim().split_whitespace().next().map(|s| s.to_string()))
-                .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
-                .collect();
-            for id in &owned_sessions {
-                if live_ids.contains(id) {
-                    eprintln!("[browser] Reusing owned session {}.", id);
-                    return Ok(id.clone());
+        let browser_port_alive = get_session_browser_port(claude_session_id).map(|p| {
+            std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
+                std::time::Duration::from_millis(300),
+            ).is_ok()
+        }).unwrap_or(false);
+        if !browser_port_alive {
+            eprintln!("[browser] Registered session exists but underlying Chrome port is unreachable — evicting stale session mapping and relaunching.");
+            let path = browser_session_map_file();
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
+                    map.remove(claude_session_id);
+                    let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
+                }
+            }
+            remove_session_browser_port(claude_session_id);
+            kill_playwriter_ws_server();
+        } else {
+            let mut list_args: Vec<String> = prefix.to_vec();
+            list_args.extend(["session".into(), "list".into()]);
+            if let Ok(out) = Command::new(bin).args(&list_args).current_dir(cwd)
+                .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+            {
+                let list = String::from_utf8_lossy(&out.stdout);
+                let live_ids: Vec<String> = list.lines()
+                    .filter_map(|line| line.trim().split_whitespace().next().map(|s| s.to_string()))
+                    .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
+                    .collect();
+                for id in &owned_sessions {
+                    if live_ids.contains(id) {
+                        eprintln!("[browser] Reusing owned session {}.", id);
+                        return Ok(id.clone());
+                    }
                 }
             }
         }
