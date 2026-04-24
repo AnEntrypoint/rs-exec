@@ -973,13 +973,17 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
     let owned_sessions = get_registered_sessions(claude_session_id);
     if !owned_sessions.is_empty() {
         let browser_port_alive = get_session_browser_port(claude_session_id).map(|p| {
-            std::net::TcpStream::connect_timeout(
-                &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
-                std::time::Duration::from_millis(300),
-            ).is_ok()
+            for attempt in 0..5 {
+                if std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
+                    std::time::Duration::from_millis(800),
+                ).is_ok() { return true; }
+                if attempt < 4 { std::thread::sleep(std::time::Duration::from_millis(300)); }
+            }
+            false
         }).unwrap_or(false);
         if !browser_port_alive {
-            eprintln!("[browser] Registered session exists but underlying Chrome port is unreachable — evicting stale session mapping and relaunching.");
+            eprintln!("[browser] Registered session exists but Chrome port unreachable after 5 retries — evicting stale session mapping and relaunching.");
             let path = browser_session_map_file();
             if let Ok(s) = std::fs::read_to_string(&path) {
                 if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
