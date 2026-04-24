@@ -1049,7 +1049,21 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                 return Ok(id);
             }
         }
-        eprintln!("[browser] Existing session browser on port {} unreachable or belongs to another session, killing stale processes and launching new.", p);
+        if port_belongs_to_session(p, &expected_profile) {
+            eprintln!("[browser] Chrome alive on port {} but relay was killed; retrying new-session after relay restart.", p);
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Some(id) = try_new_session(bin, prefix, cwd, Some(&format!("--direct=localhost:{}", p))) {
+                    eprintln!("[browser] Reconnected to existing session browser on port {} after relay restart.", p);
+                    register_browser_session(claude_session_id, &id);
+                    set_session_browser_port(claude_session_id, p);
+                    return Ok(id);
+                }
+            }
+            eprintln!("[browser] Relay restart failed after 6 attempts; killing Chrome and relaunching.", );
+        } else {
+            eprintln!("[browser] Port {} belongs to another session or unreachable; killing stale processes.", p);
+        }
         remove_session_browser_port(claude_session_id);
         kill_stale_managed_browser(&expected_profile);
         find_free_port(9222)
