@@ -51,15 +51,18 @@ enum Cmd {
 }
 
 async fn ensure_runner() -> anyhow::Result<()> {
+    // Fast path: already healthy.
     if rpc_client::health_check().await { return Ok(()); }
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    if rpc_client::health_check().await { return Ok(()); }
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-    if rpc_client::health_check().await { return Ok(()); }
+    // No retry-with-backoff before spawning. health_check fails fast on stale
+    // port file (connect refused) and bounded on wedged listener (read timeout).
+    // Either way, the right answer is to spawn a fresh runner — it will
+    // atomically replace port_file with its own OS-assigned port, after which
+    // health_check resolves cleanly. Backoff before spawn just compounded the
+    // hang when port_file pointed at a half-dead Windows orphan listener.
     eprintln!("Auto-starting runner...");
     daemon::start(BM2_NAME, &self_exe(), &["--runner-mode"])?;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
         if rpc_client::health_check().await { return Ok(()); }
     }
     Err(anyhow::anyhow!("Runner did not become healthy in time"))
