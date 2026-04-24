@@ -162,6 +162,32 @@ pub async fn run_server() -> anyhow::Result<()> {
     });
     let app = Router::new().route("/health", get(crate::rpc::health)).route("/rpc", post(crate::rpc::rpc_handler)).with_state(state);
     const PREFERRED_PORT: u16 = 32882;
+    let port_in_use = TcpListener::bind(format!("127.0.0.1:{}", PREFERRED_PORT)).await.is_err();
+    if port_in_use {
+        eprintln!("[DAEMON:fsm] Port {} occupied — sending shutdown to incumbent runner.", PREFERRED_PORT);
+        let body = r#"{"method":"shutdown","params":{},"id":1}"#;
+        let request = format!(
+            "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            PREFERRED_PORT, body.len(), body
+        );
+        if let Ok(mut stream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", PREFERRED_PORT)).await {
+            use tokio::io::AsyncWriteExt;
+            let _ = stream.write_all(request.as_bytes()).await;
+            let _ = stream.flush().await;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if TcpListener::bind(format!("127.0.0.1:{}", PREFERRED_PORT)).await.is_ok() {
+                eprintln!("[DAEMON:fsm] Port {} now free after shutdown.", PREFERRED_PORT);
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                eprintln!("[DAEMON:fsm] Port {} still occupied after 3s — will use fallback port.", PREFERRED_PORT);
+                break;
+            }
+        }
+    }
     let listener = match TcpListener::bind(format!("127.0.0.1:{}", PREFERRED_PORT)).await {
         Ok(l) => {
             fs::write(port_file(), PREFERRED_PORT.to_string())?;
