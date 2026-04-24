@@ -103,6 +103,7 @@ fn reap_orphaned_browsers() {
             let mut hops = 0;
             while let Some(ppid) = pp {
                 if hops > 8 { break; }
+                if runner_pids.contains(&ppid.as_u32()) { return false; }
                 if let Some(parent_proc) = sys.process(ppid) {
                     let pcmd = parent_proc.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
                     if pcmd.contains(".plugkit-browser-profile") {
@@ -134,8 +135,15 @@ fn reap_playwriter_ws_server(runner_pids: &std::collections::HashSet<u32>) {
             if !is_ws { return false; }
             let age = now_secs.saturating_sub(p.start_time());
             if age < 5 { return false; }
-            let parent = p.parent().map(|pp| pp.as_u32()).unwrap_or(0);
-            !runner_pids.contains(&parent)
+            let mut pp = p.parent();
+            let mut hops = 0;
+            while let Some(ppid) = pp {
+                if hops > 8 { break; }
+                if runner_pids.contains(&ppid.as_u32()) { return false; }
+                pp = sys.process(ppid).and_then(|pr| pr.parent());
+                hops += 1;
+            }
+            true
         })
         .map(|p| p.pid().as_u32())
         .collect();
