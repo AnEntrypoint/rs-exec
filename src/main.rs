@@ -89,12 +89,16 @@ async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
         Err(e) => json!({ "error": e.to_string() }),
     };
 
-    if let Some(arr) = result["output"].as_array() {
+    let printed_from_output = if let Some(arr) = result["output"].as_array() {
+        let mut printed = false;
         for e in arr {
             let d = e["d"].as_str().unwrap_or("");
             if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); }
+            if !d.is_empty() { printed = true; }
         }
-    } else {
+        printed
+    } else { false };
+    if !printed_from_output {
         if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
         if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
     }
