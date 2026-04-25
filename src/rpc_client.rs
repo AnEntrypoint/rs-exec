@@ -16,11 +16,16 @@ fn get_port() -> anyhow::Result<u16> {
 }
 
 fn http_post(port: u16, path: &str, body: &str, timeout_ms: u64) -> anyhow::Result<String> {
+    let connect_timeout = if timeout_ms == 0 { 5000 } else { timeout_ms.min(5000) };
     let mut stream = TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse()?,
-        Duration::from_millis(timeout_ms.min(5000)),
+        Duration::from_millis(connect_timeout),
     )?;
-    stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)))?;
+    if timeout_ms == 0 {
+        stream.set_read_timeout(None)?;
+    } else {
+        stream.set_read_timeout(Some(Duration::from_millis(timeout_ms)))?;
+    }
     stream.set_write_timeout(Some(Duration::from_millis(5000)))?;
     let req = format!(
         "POST {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

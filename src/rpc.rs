@@ -21,13 +21,27 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let code = params["code"].as_str().unwrap_or("").to_string();
             let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
             let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();
-            let _timeout = params["timeout"].as_u64().unwrap_or(15000);
             let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
             if let Some(sid) = params["sessionId"].as_str() { state.store.set_session_id(task_id, sid); }
             let sid = params["sessionId"].as_str().unwrap_or("").to_string();
             touch_session_activity(&sid);
             spawn_exec_process(state, task_id, &code, &runtime, &cwd, &sid).await?;
-            Ok(json!({ "result": { "backgroundTaskId": task_id, "persisted": true } }))
+            loop {
+                state.store.wait_for_output(task_id, 30000).await;
+                match state.store.get_task_status(task_id) {
+                    Some((TaskStatus::Completed, Some(r))) => {
+                        let output: Vec<Value> = state.store.get_and_clear_output(task_id).iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
+                        state.store.delete_task(task_id);
+                        return Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": r.success, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "output": output } }));
+                    }
+                    Some((TaskStatus::Failed, Some(r))) => {
+                        state.store.delete_task(task_id);
+                        return Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": false, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error } }));
+                    }
+                    None => return Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": false, "exitCode": 1, "stdout": "", "stderr": "Task lost", "error": "Task lost" } })),
+                    _ => {}
+                }
+            }
         }
         "createTask" => {
             let id = state.store.create_task();

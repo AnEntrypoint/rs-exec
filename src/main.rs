@@ -10,7 +10,6 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::{env, fs, path::PathBuf, time::Duration};
 
-const HARD_CEILING_MS: u64 = 15000;
 const BM2_NAME: &str = "rs-exec-runner";
 
 fn port_file() -> PathBuf {
@@ -81,41 +80,24 @@ async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
     let task_id_val = rpc_client::rpc_call("createTask", json!({ "code": code, "runtime": runtime, "workingDirectory": cwd }), 10000).await?;
     let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
 
-    let safety = tokio::time::sleep(Duration::from_millis(HARD_CEILING_MS));
-    tokio::pin!(safety);
-
-    let exec_fut = rpc_client::rpc_call(
+    let result = match rpc_client::rpc_call(
         "execute",
-        json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "timeout": HARD_CEILING_MS, "backgroundTaskId": task_id }),
-        HARD_CEILING_MS + 5000,
-    );
-
-    let result = tokio::select! {
-        r = exec_fut => match r {
-            Ok(v) => v["result"].clone(),
-            Err(e) => json!({ "error": e.to_string() }),
-        },
-        _ = safety => json!({ "backgroundTaskId": task_id, "persisted": true }),
+        json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "backgroundTaskId": task_id }),
+        0,
+    ).await {
+        Ok(v) => v["result"].clone(),
+        Err(e) => json!({ "error": e.to_string() }),
     };
 
-    if result["persisted"].as_bool().unwrap_or(false) || (result["backgroundTaskId"].is_u64() && !result["completed"].as_bool().unwrap_or(false)) {
-        let id = format!("task_{}", result["backgroundTaskId"].as_u64().unwrap_or(task_id));
-        println!("\nStill running after 15s — backgrounded.\nTask ID: {}\n", id);
-        println!("  rs-exec sleep {}       # wait for completion (up to 30s)", id);
-        println!("  rs-exec status {}      # drain output buffer", id);
-        println!("  rs-exec close {}       # delete task when done", id);
-        println!("  rs-exec runner stop    # stop runner when all tasks done");
-        return Ok(0);
-    }
-
-    if result["backgroundTaskId"].is_u64() && result["completed"].as_bool().unwrap_or(false) {
-        let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": result["backgroundTaskId"] }), 5000).await;
+    if let Some(arr) = result["output"].as_array() {
+        for e in arr {
+            let d = e["d"].as_str().unwrap_or("");
+            if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); }
+        }
     } else {
-        let _ = rpc_client::rpc_call("deleteTask", json!({ "taskId": task_id }), 5000).await;
+        if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
+        if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
     }
-
-    if let Some(s) = result["stdout"].as_str() { if !s.is_empty() { print!("{}", s); } }
-    if let Some(s) = result["stderr"].as_str() { if !s.is_empty() { eprint!("{}", s); } }
     if let Some(e) = result["error"].as_str() { if !e.is_empty() { eprintln!("Error: {}", e); return Ok(1); } }
 
     let exit_code = result["exitCode"].as_i64().unwrap_or(0) as i32;
@@ -191,16 +173,6 @@ async fn cmd_type(task_id_str: &str, input: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_running_tools() {
-    let procs = daemon::list();
-    let online: Vec<_> = procs.iter().filter(|p| p.status == "online").collect();
-    if online.is_empty() { eprintln!("\n[Running tools: none]"); }
-    else {
-        eprintln!("\n[Running tools]");
-        for p in &online { eprintln!("  {}  pid={}", p.name, p.pid.map(|p| p.to_string()).unwrap_or_else(|| "n/a".into())); }
-        eprintln!("  Tip: rs-exec sleep <task_id>   # wait for a task");
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -303,6 +275,5 @@ async fn main() {
     }.await;
 
     if let Err(e) = result { eprintln!("Error: {}", e); exit_code = 1; }
-    print_running_tools();
     std::process::exit(exit_code);
 }
