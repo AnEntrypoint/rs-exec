@@ -734,16 +734,37 @@ fn kill_stale_managed_browser(user_data: &std::path::Path) {
     let profile_str = user_data.to_string_lossy().to_lowercase();
     let mut sys = sysinfo::System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
-    let roots: Vec<u32> = sys.processes().iter()
+    let exact: Vec<u32> = sys.processes().iter()
         .filter(|(_, proc)| {
             let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
             cmd.iter().any(|a| a.contains("user-data-dir") && a.contains(profile_str.as_str()))
         })
         .map(|(pid, _)| pid.as_u32())
         .collect();
-    let killed_any = !roots.is_empty();
-    for pid in roots {
-        eprintln!("[browser] Killing stale managed browser pid tree {}.", pid);
+    let orphans: Vec<u32> = sys.processes().iter()
+        .filter(|(_, proc)| {
+            let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().to_lowercase()).collect();
+            if !cmd.iter().any(|a| a.contains(".plugkit-browser-profile")) { return false; }
+            let mut pp = proc.parent();
+            let mut hops = 0;
+            while let Some(ppid) = pp {
+                if hops > 8 { break; }
+                if let Some(parent_proc) = sys.process(ppid) {
+                    let pcmd: String = parent_proc.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ").to_lowercase();
+                    if pcmd.contains(".plugkit-browser-profile") { return false; }
+                    pp = parent_proc.parent();
+                } else { return true; }
+                hops += 1;
+            }
+            false
+        })
+        .map(|(pid, _)| pid.as_u32())
+        .collect();
+    let mut all: std::collections::HashSet<u32> = exact.into_iter().collect();
+    for p in orphans { all.insert(p); }
+    let killed_any = !all.is_empty();
+    for pid in all {
+        eprintln!("[browser] Killing stale/orphan browser pid tree {}.", pid);
         crate::kill::kill_tree(pid);
     }
     if killed_any { kill_playwriter_ws_server(); }
