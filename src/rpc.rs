@@ -151,7 +151,14 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
         "killPort" => {
             let port = params["port"].as_u64().unwrap_or(0) as u16;
             if port == 0 { return Ok(json!({ "ok": false, "error": "port required" })); }
-            let output = std::process::Command::new("netstat").args(["-ano"]).output()?;
+            let mut netstat_cmd = std::process::Command::new("netstat");
+            netstat_cmd.args(["-ano"]);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                netstat_cmd.creation_flags(0x08000000);
+            }
+            let output = netstat_cmd.output()?;
             let port_str = format!(":{}", port);
             let mut killed_pid = 0u32;
             for line in String::from_utf8_lossy(&output.stdout).lines() {

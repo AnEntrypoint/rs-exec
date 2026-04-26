@@ -15,6 +15,13 @@ fn spawn_no_window(cmd: &mut Command) -> std::io::Result<Child> {
     { cmd.spawn() }
 }
 
+fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    { cmd.creation_flags(CREATE_NO_WINDOW) }
+    #[cfg(not(windows))]
+    { cmd }
+}
+
 pub fn normalize_cwd(cwd: &str) -> String {
     if !cfg!(windows) { return cwd.to_string(); }
     if let Some(rest) = cwd.strip_prefix('/') {
@@ -427,8 +434,7 @@ process.stdin.resume();\n\
 process.stdin.on('data', buf => port.write(buf));\n",
                 port_name, baud, port_name, baud);
             std::fs::write(&script_path, &script)?;
-            let global_modules = std::process::Command::new("npm")
-                .args(["root", "-g"])
+            let global_modules = no_window(std::process::Command::new("npm").args(["root", "-g"]))
                 .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_default();
@@ -684,15 +690,14 @@ fn ensure_managed_browser() -> Result<PathBuf, String> {
     let installer_path = install_dir.join("GoogleChromePortable_installer.exe");
 
     eprintln!("[browser] Downloading Chrome Portable installer...");
-    let dl_result = Command::new("powershell")
-        .args([
+    let dl_result = no_window(Command::new("powershell").args([
             "-NoProfile", "-NonInteractive", "-Command",
             &format!(
                 "Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
                 installer_url,
                 installer_path.display()
             ),
-        ])
+        ]))
         .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
 
     match dl_result {
@@ -706,11 +711,10 @@ fn ensure_managed_browser() -> Result<PathBuf, String> {
         Err(e) => return Err(format!("Failed to run downloader: {}", e)),
     }
 
-    let install_result = Command::new(&installer_path)
-        .args([
+    let install_result = no_window(Command::new(&installer_path).args([
             &format!("/DESTINATION={}", install_dir.display()),
             "/SILENT",
-        ])
+        ]))
         .stdout(Stdio::piped()).stderr(Stdio::piped()).output();
 
     match install_result {
@@ -837,7 +841,7 @@ fn find_playwriter_extension() -> Option<std::path::PathBuf> {
             v.push(std::path::PathBuf::from(&home).join(".npm-global").join("lib").join("node_modules").join("playwriter").join("dist").join("extension"));
             v.push(std::path::PathBuf::from(&home).join(".local").join("lib").join("node_modules").join("playwriter").join("dist").join("extension"));
         }
-        if let Ok(out) = Command::new("npm").args(["root", "-g"]).output() {
+        if let Ok(out) = no_window(Command::new("npm").args(["root", "-g"])).output() {
             let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !root.is_empty() {
                 v.push(std::path::PathBuf::from(root).join("playwriter").join("dist").join("extension"));
@@ -930,8 +934,8 @@ fn try_new_session(bin: &str, prefix: &[String], cwd: &str, direct_arg: Option<&
         Some(d) => args.push(d.to_string()),
         None => args.push("--direct".into()),
     }
-    if let Ok(out) = Command::new(bin).args(&args).current_dir(cwd)
-        .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+    if let Ok(out) = no_window(Command::new(bin).args(&args).current_dir(cwd)
+        .stdout(Stdio::piped()).stderr(Stdio::piped())).output()
     {
         let s = String::from_utf8_lossy(&out.stdout);
         for line in s.lines() {
@@ -1017,8 +1021,8 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
         } else {
             let mut list_args: Vec<String> = prefix.to_vec();
             list_args.extend(["session".into(), "list".into()]);
-            if let Ok(out) = Command::new(bin).args(&list_args).current_dir(cwd)
-                .stdout(Stdio::piped()).stderr(Stdio::piped()).output()
+            if let Ok(out) = no_window(Command::new(bin).args(&list_args).current_dir(cwd)
+                .stdout(Stdio::piped()).stderr(Stdio::piped())).output()
             {
                 let list = String::from_utf8_lossy(&out.stdout);
                 let live_ids: Vec<String> = list.lines()
@@ -1029,8 +1033,8 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                     if live_ids.contains(id) {
                         let mut probe_args: Vec<String> = prefix.to_vec();
                         probe_args.extend(["-s".into(), id.clone(), "--timeout".into(), "3000".into(), "-e".into(), "1".into()]);
-                        let probe_ok = Command::new(bin).args(&probe_args).current_dir(cwd)
-                            .stdout(Stdio::piped()).stderr(Stdio::piped())
+                        let probe_ok = no_window(Command::new(bin).args(&probe_args).current_dir(cwd)
+                            .stdout(Stdio::piped()).stderr(Stdio::piped()))
                             .output()
                             .map(|o| o.status.success())
                             .unwrap_or(false);
@@ -1041,8 +1045,8 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                             eprintln!("[browser] Owned session {} listed but liveness probe failed (stale CDP UUID?); evicting.", id);
                             let mut del_args: Vec<String> = prefix.to_vec();
                             del_args.extend(["session".into(), "delete".into(), id.clone()]);
-                            let _ = Command::new(bin).args(&del_args).current_dir(cwd)
-                                .stdout(Stdio::null()).stderr(Stdio::null()).output();
+                            let _ = no_window(Command::new(bin).args(&del_args).current_dir(cwd)
+                                .stdout(Stdio::null()).stderr(Stdio::null())).output();
                             let path = browser_session_map_file();
                             if let Ok(s) = std::fs::read_to_string(&path) {
                                 if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
