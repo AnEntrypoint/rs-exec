@@ -600,8 +600,6 @@ const PLUGKIT_IGNORE_PATTERNS: &[&str] = &[
     ".plugkit-browser-profile/",
     ".plugkit-browser-profile-*/",
     ".plugkit-agent-worktree/",
-    ".code-search/",
-    ".codeinsight",
     "*.stackdump",
 ];
 
