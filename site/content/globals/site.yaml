@@ -1,0 +1,17 @@
+title: "rs-exec"
+tagline: "MCP code execution in Rust"
+description: "multi-language code execution (JS/TS, Go, Rust, Python, C/C++, bash) over MCP. the EXECUTE muscle of the gm package. fast because it's Rust."
+repo: "https://github.com/AnEntrypoint/rs-exec"
+url: "https://anentrypoint.github.io/rs-exec"
+year: 2026
+keywords:
+  - "rust"
+  - "mcp"
+  - "polyglot"
+  - "247420"
+  - "anentrypoint"
+accent_from: "#7ee787"
+accent_to: "#56d364"
+glyph: "⚙"
+code: "002"
+category: "gm"

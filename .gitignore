@@ -3,3 +3,8 @@
 
 .code-search/
 .prd
+dist/
+.gm/
+.codeinsight/
+rs-learn.db
+.plugkit-browser-profile/

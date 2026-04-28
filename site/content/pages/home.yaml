@@ -1,0 +1,29 @@
+id: home
+title: Home
+hero:
+  heading: "rs-exec"
+  subheading: "MCP code execution in Rust"
+  body: "multi-language code execution (JS/TS, Go, Rust, Python, C/C++, bash) over MCP. the EXECUTE muscle of the gm package. fast because it's Rust."
+  badges:
+    - { label: "rust" }
+    - { label: "mcp" }
+    - { label: "polyglot" }
+    - { label: "gm" }
+  ctas:
+    - { label: "GitHub", href: "https://github.com/AnEntrypoint/rs-exec", primary: true }
+    - { label: "Install", href: "https://github.com/AnEntrypoint/rs-exec#installation" }
+    - { label: "247420", href: "https://247420.xyz" }
+features:
+  heading: "Why rs-exec"
+  items:
+    - { name: "rust", desc: "flagship trait of rs-exec." }
+    - { name: "mcp", desc: "core capability of rs-exec." }
+    - { name: "polyglot", desc: "core capability of rs-exec." }
+quickstart:
+  heading: Quick start
+  lines:
+    - { kind: "cmt", text: "# install" }
+    - { kind: "cmd", text: "cargo install rs-exec" }
+    - { kind: "cmt", text: "" }
+    - { kind: "cmt", text: "# source" }
+    - { kind: "cmd", text: "git clone https://github.com/AnEntrypoint/rs-exec.git" }
