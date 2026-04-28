@@ -125,6 +125,15 @@ impl BackgroundTaskStore {
         tokio::time::timeout(Duration::from_millis(timeout_ms), notifier.notified()).await.is_ok()
     }
 
+    pub async fn wait_for_completion(&self, id: u64) {
+        loop {
+            let notifier = self.get_or_create_notifier(id);
+            let done_or_gone = { self.tasks.lock().unwrap().get(&id).map(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Failed)).unwrap_or(true) };
+            if done_or_gone { return; }
+            notifier.notified().await;
+        }
+    }
+
     pub fn cleanup_old_tasks(&self, active: &Arc<Mutex<HashMap<u64, (u32, Option<ChildStdin>)>>>) {
         let max_age = Duration::from_secs(30 * 60);
         let evicted: Vec<u64> = { self.tasks.lock().unwrap().values().filter(|t| t.completed_at.map(|c| c.elapsed() >= max_age).unwrap_or(false)).map(|t| t.id).collect() };

@@ -39,10 +39,6 @@ enum Cmd {
         #[arg(long)] cwd: Option<String>,
         commands: Vec<String>,
     },
-    Status { task_id: String },
-    Sleep { task_id: String, seconds: Option<u64>, #[arg(long)] next_output: bool },
-    Close { task_id: String },
-    #[command(name = "type")] Type { task_id: String, input: Vec<String> },
     Runner { sub: String },
     Pm2list,
     #[command(name = "kill-port")] KillPort { port: u16 },
@@ -67,17 +63,13 @@ async fn ensure_runner() -> anyhow::Result<()> {
     Err(anyhow::anyhow!("Runner did not become healthy in time"))
 }
 
-fn parse_task_id(s: &str) -> u64 {
-    s.trim_start_matches("task_").parse().unwrap_or(0)
-}
-
 fn normalize_code_input(raw: String) -> String {
     raw.trim_start_matches('\u{feff}').to_string()
 }
 
 async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
     ensure_runner().await?;
-    let task_id_val = rpc_client::rpc_call("createTask", json!({ "code": code, "runtime": runtime, "workingDirectory": cwd }), 10000).await?;
+    let task_id_val = rpc_client::rpc_call("createTask", json!({ "code": code, "runtime": runtime, "workingDirectory": cwd }), 0).await?;
     let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
 
     let result = match rpc_client::rpc_call(
@@ -108,75 +100,6 @@ async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
     if result["success"].as_bool() == Some(false) { return Ok(if exit_code != 0 { exit_code } else { 1 }); }
     Ok(exit_code)
 }
-
-async fn cmd_status(task_id_str: &str) -> anyhow::Result<()> {
-    ensure_runner().await?;
-    let raw_id = parse_task_id(task_id_str);
-    let task = rpc_client::rpc_call("getTask", json!({ "taskId": raw_id }), 10000).await?;
-    let task = &task["task"];
-    if task.is_null() { eprintln!("Task not found"); std::process::exit(1); }
-    println!("Status: {}", task["status"].as_str().unwrap_or("unknown"));
-    let output = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": raw_id }), 5000).await?;
-    let mut drained_any = false;
-    if let Some(arr) = output["output"].as_array() {
-        for e in arr { let d = e["d"].as_str().unwrap_or(""); if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); } }
-        drained_any = !arr.is_empty();
-    }
-    if !drained_any {
-        if let Some(r) = task["result"].as_object() {
-            if let Some(s) = r.get("stdout").and_then(|v| v.as_str()) { if !s.is_empty() { print!("{}", s); } }
-            if let Some(s) = r.get("stderr").and_then(|v| v.as_str()) { if !s.is_empty() { eprint!("{}", s); } }
-            if let Some(e) = r.get("error").and_then(|v| v.as_str()) { if !e.is_empty() { eprintln!("Error: {}", e); } }
-        }
-    }
-    Ok(())
-}
-
-async fn cmd_sleep(task_id_str: &str, secs: u64, next_output: bool) -> anyhow::Result<()> {
-    ensure_runner().await?;
-    let raw_id = parse_task_id(task_id_str);
-    let timeout = Duration::from_secs(secs);
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() >= timeout { break; }
-        let task = rpc_client::rpc_call("getTask", json!({ "taskId": raw_id }), 5000).await?;
-        let task = &task["task"];
-        if task.is_null() { println!("Task not found or already completed."); return Ok(()); }
-        let output = rpc_client::rpc_call("getAndClearOutput", json!({ "taskId": raw_id }), 5000).await?;
-        if let Some(arr) = output["output"].as_array() {
-            for e in arr { let d = e["d"].as_str().unwrap_or(""); if e["s"] == "stdout" { print!("{}", d); } else { eprint!("{}", d); } }
-        }
-        let status = task["status"].as_str().unwrap_or("");
-        if status != "running" && status != "pending" {
-            println!("\nTask finished ({}).\n  rs-exec close {}      # delete task", status, task_id_str);
-            return Ok(());
-        }
-        if next_output {
-            let remaining = timeout.saturating_sub(start.elapsed()).min(Duration::from_secs(30));
-            let _ = rpc_client::rpc_call("waitForOutput", json!({ "taskId": raw_id, "timeoutMs": remaining.as_millis() as u64 }), remaining.as_millis() as u64 + 5000).await;
-        } else {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    println!("\nTimeout after {}s. Task still running.\n  rs-exec sleep {}       # wait again", secs, task_id_str);
-    Ok(())
-}
-
-async fn cmd_close(task_id_str: &str) -> anyhow::Result<()> {
-    ensure_runner().await?;
-    rpc_client::rpc_call("deleteTask", json!({ "taskId": parse_task_id(task_id_str) }), 10000).await?;
-    println!("Task {} closed", task_id_str);
-    Ok(())
-}
-
-async fn cmd_type(task_id_str: &str, input: &str) -> anyhow::Result<()> {
-    ensure_runner().await?;
-    let res = rpc_client::rpc_call("sendStdin", json!({ "taskId": parse_task_id(task_id_str), "data": format!("{}\n", input) }), 10000).await?;
-    if res["ok"].as_bool().unwrap_or(false) { println!("Sent to task {}", task_id_str); }
-    else { eprintln!("Task {} not found or not running", task_id_str); }
-    Ok(())
-}
-
 
 #[tokio::main]
 async fn main() {
@@ -210,10 +133,6 @@ async fn main() {
                 let runtime = if cfg!(windows) { "powershell" } else { "bash" };
                 exit_code = run_code(&cmd, runtime, &cwd).await?;
             }
-            Cmd::Status { task_id } => cmd_status(&task_id).await?,
-            Cmd::Sleep { task_id, seconds, next_output } => cmd_sleep(&task_id, seconds.unwrap_or(30), next_output).await?,
-            Cmd::Close { task_id } => cmd_close(&task_id).await?,
-            Cmd::Type { task_id, input } => cmd_type(&task_id, &input.join(" ")).await?,
             Cmd::Runner { sub } => match sub.as_str() {
                 "start" => {
                     if rpc_client::health_check().await {
@@ -246,7 +165,7 @@ async fn main() {
             }
             Cmd::KillPort { port } => {
                 ensure_runner().await?;
-                let res = rpc_client::rpc_call("killPort", json!({ "port": port }), 10000).await?;
+                let res = rpc_client::rpc_call("killPort", json!({ "port": port }), 0).await?;
                 if res["ok"].as_bool().unwrap_or(false) {
                     println!("Killed process on port {} (pid {})", port, res["killedPid"]);
                 } else {
@@ -257,12 +176,12 @@ async fn main() {
             Cmd::SessionCleanup { session } => {
                 if session.is_empty() { return Ok(()); }
                 ensure_runner().await?;
-                rpc_client::rpc_call("deleteSessionTasks", json!({ "sessionId": session }), 10000).await?;
+                rpc_client::rpc_call("deleteSessionTasks", json!({ "sessionId": session }), 0).await?;
                 runtime::kill_session_browser(&session);
             }
             Cmd::Pm2list => {
                 ensure_runner().await?;
-                let res = rpc_client::rpc_call("pm2list", json!({}), 10000).await?;
+                let res = rpc_client::rpc_call("pm2list", json!({}), 0).await?;
                 let procs = daemon::list();
                 let online: Vec<_> = procs.iter().filter(|p| p.status == "online").collect();
                 if online.is_empty() && res["processes"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
