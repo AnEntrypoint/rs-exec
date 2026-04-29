@@ -18,6 +18,10 @@ pub async fn rpc_handler(State(state): State<Arc<AppState>>, Json(req): Json<cra
 pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyhow::Result<Value> {
     match method {
         "execute" => {
+            let timeout_ms = params["timeoutMs"].as_u64().unwrap_or(0);
+            if timeout_ms == 0 {
+                return Err(anyhow::anyhow!("timeoutMs required (>0 ms) — all executions must specify a timeout"));
+            }
             let code = params["code"].as_str().unwrap_or("").to_string();
             let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
             let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();
@@ -26,7 +30,17 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let sid = params["sessionId"].as_str().unwrap_or("").to_string();
             touch_session_activity(&sid);
             spawn_exec_process(state, task_id, &code, &runtime, &cwd, &sid).await?;
-            state.store.wait_for_completion(task_id).await;
+            let waited = tokio::time::timeout(
+                Duration::from_millis(timeout_ms),
+                state.store.wait_for_completion(task_id),
+            ).await;
+            if waited.is_err() {
+                let entry = state.active.lock().unwrap().remove(&task_id);
+                if let Some((pid, stdin)) = entry { drop(stdin); crate::kill::kill_tree(pid); }
+                if !matches!(state.store.get_task_status(task_id), Some((TaskStatus::Completed, _)) | Some((TaskStatus::Failed, _))) {
+                    state.store.fail_task(task_id, format!("execution timed out after {} ms", timeout_ms));
+                }
+            }
             match state.store.get_task_status(task_id) {
                 Some((TaskStatus::Completed, Some(r))) => {
                     let output: Vec<Value> = state.store.get_and_clear_output(task_id).iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
@@ -34,8 +48,9 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
                     Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": r.success, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "output": output } }))
                 }
                 Some((TaskStatus::Failed, Some(r))) => {
+                    let output: Vec<Value> = state.store.get_and_clear_output(task_id).iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
                     state.store.delete_task(task_id);
-                    Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": false, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error } }))
+                    Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": false, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "output": output } }))
                 }
                 _ => Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": false, "exitCode": 1, "stdout": "", "stderr": "Task lost", "error": "Task lost" } })),
             }

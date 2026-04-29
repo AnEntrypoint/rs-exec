@@ -38,7 +38,10 @@ fn cleanup_idle_sessions(store: &Arc<BackgroundTaskStore>, active: &Arc<Mutex<Ha
     }
 }
 
-pub fn port_file() -> PathBuf { env::temp_dir().join("glootie-runner.port") }
+pub fn port_file() -> PathBuf {
+    if let Ok(p) = env::var("RS_EXEC_PORT_FILE") { return PathBuf::from(p); }
+    env::temp_dir().join("glootie-runner.port")
+}
 pub fn self_exe() -> String { env::current_exe().unwrap_or_default().to_string_lossy().to_string() }
 
 pub struct AppState {

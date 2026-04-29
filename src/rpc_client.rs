@@ -8,6 +8,7 @@ use std::{
 use serde_json::{json, Value};
 
 fn port_file() -> PathBuf {
+    if let Ok(p) = env::var("RS_EXEC_PORT_FILE") { return PathBuf::from(p); }
     env::temp_dir().join("glootie-runner.port")
 }
 

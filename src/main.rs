@@ -13,6 +13,7 @@ use std::{env, fs, path::PathBuf, time::Duration};
 const BM2_NAME: &str = "rs-exec-runner";
 
 fn port_file() -> PathBuf {
+    if let Ok(p) = env::var("RS_EXEC_PORT_FILE") { return PathBuf::from(p); }
     env::temp_dir().join("glootie-runner.port")
 }
 
@@ -27,16 +28,24 @@ struct Cli {
     command: Cmd,
 }
 
+fn parse_timeout_ms(s: &str) -> Result<u64, String> {
+    let n: u64 = s.parse().map_err(|_| format!("invalid --timeout (ms): {}", s))?;
+    if n == 0 { return Err("--timeout must be > 0 ms".into()); }
+    Ok(n)
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     Exec {
         #[arg(long)] lang: Option<String>,
         #[arg(long)] cwd: Option<String>,
         #[arg(long)] file: Option<String>,
+        #[arg(long, value_parser = parse_timeout_ms, help = "Mandatory execution timeout in milliseconds")] timeout: u64,
         code: Vec<String>,
     },
     Bash {
         #[arg(long)] cwd: Option<String>,
+        #[arg(long, value_parser = parse_timeout_ms, help = "Mandatory execution timeout in milliseconds")] timeout: u64,
         commands: Vec<String>,
     },
     Runner { sub: String },
@@ -67,15 +76,16 @@ fn normalize_code_input(raw: String) -> String {
     raw.trim_start_matches('\u{feff}').to_string()
 }
 
-async fn run_code(code: &str, runtime: &str, cwd: &str) -> anyhow::Result<i32> {
+async fn run_code(code: &str, runtime: &str, cwd: &str, timeout_ms: u64) -> anyhow::Result<i32> {
     ensure_runner().await?;
     let task_id_val = rpc_client::rpc_call("createTask", json!({ "code": code, "runtime": runtime, "workingDirectory": cwd }), 0).await?;
     let task_id = task_id_val["taskId"].as_u64().unwrap_or(0);
 
+    let rpc_deadline_ms = timeout_ms.saturating_add(5_000);
     let result = match rpc_client::rpc_call(
         "execute",
-        json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "backgroundTaskId": task_id }),
-        0,
+        json!({ "code": code, "runtime": runtime, "workingDirectory": cwd, "backgroundTaskId": task_id, "timeoutMs": timeout_ms }),
+        rpc_deadline_ms,
     ).await {
         Ok(v) => v["result"].clone(),
         Err(e) => json!({ "error": e.to_string() }),
@@ -118,20 +128,20 @@ async fn main() {
 
     let result: anyhow::Result<()> = async {
         match cli.command {
-            Cmd::Exec { lang, cwd, file, code } => {
+            Cmd::Exec { lang, cwd, file, timeout, code } => {
                 let code_str = if let Some(f) = file { normalize_code_input(fs::read_to_string(f)?) } else { normalize_code_input(code.join(" ")) };
                 if code_str.trim().is_empty() { eprintln!("No code provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let mut runtime = lang.unwrap_or_else(|| "nodejs".into());
                 if runtime == "typescript" || runtime == "auto" { runtime = "nodejs".into(); }
-                exit_code = run_code(&code_str, &runtime, &cwd).await?;
+                exit_code = run_code(&code_str, &runtime, &cwd, timeout).await?;
             }
-            Cmd::Bash { cwd, commands } => {
+            Cmd::Bash { cwd, timeout, commands } => {
                 let cmd = commands.join(" ");
                 if cmd.trim().is_empty() { eprintln!("No commands provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
                 let runtime = if cfg!(windows) { "powershell" } else { "bash" };
-                exit_code = run_code(&cmd, runtime, &cwd).await?;
+                exit_code = run_code(&cmd, runtime, &cwd, timeout).await?;
             }
             Cmd::Runner { sub } => match sub.as_str() {
                 "start" => {
