@@ -97,7 +97,7 @@ function Footer() {
   );
 }
 
-const navItems = (nav && nav.links ? nav.links : []).map(l => [l.label, l.href]);
+const navItems = (nav && nav.links ? nav.links : []).map(l => [String(l.label || ''), l.href]);
 
 const App = C.AppShell({
   topbar: C.Topbar({
