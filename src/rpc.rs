@@ -18,10 +18,14 @@ pub async fn rpc_handler(State(state): State<Arc<AppState>>, Json(req): Json<cra
 pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyhow::Result<Value> {
     match method {
         "execute" => {
-            let timeout_ms = params["timeoutMs"].as_u64().unwrap_or(0);
-            if timeout_ms == 0 {
-                return Err(anyhow::anyhow!("timeoutMs required (>0 ms) — all executions must specify a timeout"));
-            }
+            const DEFAULT_TIMEOUT_MS: u64 = 300_000;
+            let timeout_ms = match params["timeoutMs"].as_u64() {
+                Some(n) if n > 0 => n,
+                _ => {
+                    eprintln!("[runner] warn: execute called without timeoutMs; applying default {} ms (set timeoutMs explicitly to silence)", DEFAULT_TIMEOUT_MS);
+                    DEFAULT_TIMEOUT_MS
+                }
+            };
             let code = params["code"].as_str().unwrap_or("").to_string();
             let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
             let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();

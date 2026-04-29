@@ -1,6 +1,6 @@
-## 2026-04-29
-- BREAKING: `timeoutMs` is now mandatory on the `execute` RPC. Calls without it (or with 0) return an error: `timeoutMs required (>0 ms)`. Children exceeding the budget are killed via `kill_tree` and the task is failed with `execution timed out after <N> ms`.
-- BREAKING: `rs-exec exec` and `rs-exec bash` CLI subcommands require `--timeout <ms>` (must be >0). clap rejects missing/zero values.
+## 2026-04-29 (hotfix)
+- `execute` RPC no longer rejects missing/zero `timeoutMs`. Instead it applies a 5-minute (300_000 ms) default and logs a stderr deprecation warning so existing callers (rs-plugkit, hook code) keep working while they migrate. The earlier hard rejection caused a process-spawn cascade in production when downstream callers had not yet been updated. Children exceeding the budget are still killed via `kill_tree` and the task still fails with `execution timed out after <N> ms` — the safety guarantee is preserved.
+- CLI `rs-exec exec` and `rs-exec bash` continue to require `--timeout <ms>` (clap rejects missing/zero) — fresh interface, no legacy callers.
 - `run_code` plumbs the timeout through to the RPC and uses `timeout + 5000ms` as the rpc_client read deadline.
 - New env override: `RS_EXEC_PORT_FILE` lets a runner+CLI use a private port file for isolated test runs.
 
