@@ -22,6 +22,13 @@ fn no_window(cmd: &mut Command) -> &mut Command {
     { cmd }
 }
 
+fn wrap_nodejs_for_throw_surfacing(code: &str) -> String {
+    format!(
+        "(async()=>{{try{{{}\n}}catch(__e){{try{{process.stderr.write(String((__e&&__e.stack)||__e)+'\\n')}}catch(_){{}};process.exitCode=1}}}})()",
+        code
+    )
+}
+
 pub fn normalize_cwd(cwd: &str) -> String {
     if !cfg!(windows) { return cwd.to_string(); }
     if let Some(rest) = cwd.strip_prefix('/') {
@@ -225,8 +232,9 @@ pub fn spawn_process(runtime: &str, code: &str, cwd_raw: &str, session_id: &str)
                 .or_else(|_| which::which("bun"))
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "bun".to_string());
+            let wrapped = wrap_nodejs_for_throw_surfacing(code);
             let child = spawn_no_window(Command::new(&bun_bin)
-                .args(["-e", code])
+                .args(["-e", &wrapped])
                 .current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()))?;
             Ok(SpawnResult { child, _tmpdir: None, compile_phase: None })
         }

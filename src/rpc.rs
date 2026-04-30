@@ -18,13 +18,9 @@ pub async fn rpc_handler(State(state): State<Arc<AppState>>, Json(req): Json<cra
 pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyhow::Result<Value> {
     match method {
         "execute" => {
-            const DEFAULT_TIMEOUT_MS: u64 = 300_000;
             let timeout_ms = match params["timeoutMs"].as_u64() {
                 Some(n) if n > 0 => n,
-                _ => {
-                    eprintln!("[runner] warn: execute called without timeoutMs; applying default {} ms (set timeoutMs explicitly to silence)", DEFAULT_TIMEOUT_MS);
-                    DEFAULT_TIMEOUT_MS
-                }
+                _ => return Err(anyhow::anyhow!("timeoutMs required (positive integer milliseconds)")),
             };
             let code = params["code"].as_str().unwrap_or("").to_string();
             let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
@@ -38,7 +34,8 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
                 Duration::from_millis(timeout_ms),
                 state.store.wait_for_completion(task_id),
             ).await;
-            if waited.is_err() {
+            let timed_out = waited.is_err();
+            if timed_out {
                 let entry = state.active.lock().unwrap().remove(&task_id);
                 if let Some((pid, stdin)) = entry { drop(stdin); crate::kill::kill_tree(pid); }
                 if !matches!(state.store.get_task_status(task_id), Some((TaskStatus::Completed, _)) | Some((TaskStatus::Failed, _))) {
@@ -49,14 +46,14 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
                 Some((TaskStatus::Completed, Some(r))) => {
                     let output: Vec<Value> = state.store.get_and_clear_output(task_id).iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
                     state.store.delete_task(task_id);
-                    Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": r.success, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "output": output } }))
+                    Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "timedOut": timed_out, "success": r.success, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "output": output } }))
                 }
                 Some((TaskStatus::Failed, Some(r))) => {
                     let output: Vec<Value> = state.store.get_and_clear_output(task_id).iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
                     state.store.delete_task(task_id);
-                    Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": false, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "output": output } }))
+                    Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "timedOut": timed_out, "success": false, "exitCode": r.exit_code, "stdout": r.stdout, "stderr": r.stderr, "error": r.error, "output": output } }))
                 }
-                _ => Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "success": false, "exitCode": 1, "stdout": "", "stderr": "Task lost", "error": "Task lost" } })),
+                _ => Ok(json!({ "result": { "backgroundTaskId": task_id, "completed": true, "timedOut": timed_out, "success": false, "exitCode": 1, "stdout": "", "stderr": "Task lost", "error": "Task lost" } })),
             }
         }
         "createTask" => {
