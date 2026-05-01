@@ -266,6 +266,18 @@ pub fn spawn_process(runtime: &str, code: &str, cwd_raw: &str, session_id: &str)
     let cwd_owned = resolve_valid_cwd(&cwd_normalized);
     let cwd = cwd_owned.as_str();
     ensure_plugkit_gitignore(cwd);
+    let result = spawn_process_inner(runtime, code, cwd, session_id);
+    crate::obs::event("exec", "spawn", serde_json::json!({
+        "runtime": runtime,
+        "code_len": code.len(),
+        "cwd": cwd,
+        "ok": result.is_ok(),
+        "err": result.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
+    }));
+    result
+}
+
+fn spawn_process_inner(runtime: &str, code: &str, cwd: &str, session_id: &str) -> anyhow::Result<SpawnResult> {
     match runtime {
         "nodejs" | "typescript" => {
             let bun_bin = which::which("bun.exe")
