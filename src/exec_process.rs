@@ -18,6 +18,7 @@ fn spawn_no_window(cmd: &mut Command) -> std::io::Result<Child> {
 
 mod runtime;
 mod kill;
+mod obs;
 
 fn rpc_sync(port: u16, method: &str, params: serde_json::Value) {
     let body = serde_json::json!({ "method": method, "params": params }).to_string();

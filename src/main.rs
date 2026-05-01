@@ -1,6 +1,7 @@
 mod daemon;
 mod background_tasks;
 mod kill;
+mod obs;
 mod runtime;
 mod rpc;
 mod runner;
