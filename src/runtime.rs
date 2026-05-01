@@ -129,6 +129,46 @@ fn gpp() -> &'static str { GPP.get_or_init(|| find_bin(&["g++"])) }
 fn java() -> &'static str { JAVA.get_or_init(|| find_bin(&["java"])) }
 fn javac() -> &'static str { JAVAC.get_or_init(|| find_bin(&["javac"])) }
 fn powershell() -> &'static str { POWERSHELL.get_or_init(|| find_bin(&["pwsh", "powershell"])) }
+
+static RTK: OnceLock<Option<String>> = OnceLock::new();
+fn rtk_path() -> Option<&'static str> {
+    RTK.get_or_init(|| which::which("rtk").ok().map(|p| p.to_string_lossy().to_string()))
+        .as_deref()
+}
+
+const RTK_COMMANDS: &[&str] = &[
+    "git", "cargo", "pytest", "jest", "npm", "yarn", "pnpm",
+    "tsc", "eslint", "docker", "kubectl", "ruff", "mypy",
+    "ls", "find", "diff", "rg",
+];
+
+fn rtk_preamble() -> Option<String> {
+    if std::env::var_os("RTK_DISABLE").is_some() { return None; }
+    if std::env::var_os("RTK_ACTIVE").is_some() { return None; }
+    let rtk = rtk_path()?;
+    let mut out = String::from("# >>> rtk auto-rewrite (set RTK_DISABLE=1 in env, or RTK_BYPASS=1 inline, to bypass)\n");
+    out.push_str("export RTK_ACTIVE=1\n");
+    out.push_str(&format!("__RTK_BIN={}\n", shell_quote(rtk)));
+    for cmd in RTK_COMMANDS {
+        out.push_str(&format!(
+            "{c}() {{ if [ -n \"$RTK_BYPASS\" ]; then command {c} \"$@\"; else \"$__RTK_BIN\" {c} \"$@\"; fi; }}\n",
+            c = cmd
+        ));
+    }
+    out.push_str("# <<< rtk auto-rewrite\n");
+    Some(out)
+}
+
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' { out.push_str("'\\''"); } else { out.push(c); }
+    }
+    out.push('\'');
+    out
+}
+
 fn ensure_playwriter() -> Option<PathBuf> {
     if let Ok(p) = which::which("playwriter") {
         return Some(p);
@@ -270,10 +310,11 @@ pub fn spawn_process(runtime: &str, code: &str, cwd_raw: &str, session_id: &str)
                     })
             } else { None };
 
+            let preamble = rtk_preamble().unwrap_or_default();
             let (cmd, script_content, ext, args): (String, String, &str, Vec<String>) = if cfg!(windows) {
                 if let Some(b) = real_bash_on_win {
                     let script = tmp.path().join("script.sh");
-                    let content = format!("#!/bin/bash\nset -e\n{}", code);
+                    let content = format!("#!/bin/bash\nset -e\n{}{}", preamble, code);
                     std::fs::write(&script, &content)?;
                     (b, content, ".sh", vec![script.to_string_lossy().replace('\\', "/")])
                 } else {
@@ -286,7 +327,7 @@ pub fn spawn_process(runtime: &str, code: &str, cwd_raw: &str, session_id: &str)
                 }
             } else {
                 let script = tmp.path().join("script.sh");
-                let content = format!("#!/bin/bash\nset -e\n{}", code);
+                let content = format!("#!/bin/bash\nset -e\n{}{}", preamble, code);
                 std::fs::write(&script, &content)?;
                 (bash().to_string(), content, ".sh", vec![script.to_string_lossy().into()])
             };
