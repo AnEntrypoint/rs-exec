@@ -140,7 +140,7 @@ async fn main() {
                 let cmd = commands.join(" ");
                 if cmd.trim().is_empty() { eprintln!("No commands provided"); exit_code = 1; return Ok(()); }
                 let cwd = cwd.unwrap_or_else(|| env::current_dir().unwrap().to_string_lossy().to_string());
-                let runtime = if cfg!(windows) { "powershell" } else { "bash" };
+                let runtime = if cfg!(windows) { "cmd" } else { "bash" };
                 exit_code = run_code(&cmd, runtime, &cwd, timeout).await?;
             }
             Cmd::Runner { sub } => match sub.as_str() {
