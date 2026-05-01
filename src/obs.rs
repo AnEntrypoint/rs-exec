@@ -78,6 +78,25 @@ fn append_jsonl(file: &PathBuf, line: &str) {
     let lock = APPEND_LOCK.get_or_init(|| std::sync::Mutex::new(()));
     let _g = lock.lock();
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(file) {
+        let needs_newline = {
+            use std::io::{Seek, SeekFrom, Read};
+            if let Ok(size) = f.seek(SeekFrom::End(0)) {
+                if size > 0 {
+                    let mut tail = [0u8; 1];
+                    f.seek(SeekFrom::End(-1)).ok();
+                    f.read_exact(&mut tail).ok();
+                    f.seek(SeekFrom::End(0)).ok();
+                    tail[0] != b'\n'
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if needs_newline {
+            let _ = f.write_all(b"\n");
+        }
         let _ = f.write_all(line.as_bytes());
         let _ = f.write_all(b"\n");
     }
