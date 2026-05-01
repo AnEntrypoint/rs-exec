@@ -96,7 +96,8 @@ pub fn event(subsystem: &str, event: &str, mut fields: Value) {
     if !sid.is_empty() { base["sess"] = json!(sid); }
     if let Some(obj) = fields.as_object_mut() {
         if let Some(b) = base.as_object_mut() {
-            for (k, v) in obj.drain() { b.insert(k, v); }
+            let taken = std::mem::take(obj);
+            for (k, v) in taken { b.insert(k, v); }
         }
     } else if !fields.is_null() {
         if let Some(b) = base.as_object_mut() { b.insert("data".into(), fields); }
