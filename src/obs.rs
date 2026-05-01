@@ -107,6 +107,7 @@ pub fn event(subsystem: &str, event: &str, mut fields: Value) {
     append_jsonl(&file, &line);
 }
 
+#[allow(dead_code)]
 pub fn span<F, R>(subsystem: &str, name: &str, fields: Value, f: F) -> R
 where F: FnOnce() -> R {
     let start = Instant::now();
