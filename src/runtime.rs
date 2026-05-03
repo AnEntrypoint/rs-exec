@@ -149,9 +149,10 @@ fn rtk_preamble() -> Option<String> {
     let mut out = String::from("# >>> rtk auto-rewrite (set RTK_DISABLE=1 in env, or RTK_BYPASS=1 inline, to bypass)\n");
     out.push_str("export RTK_ACTIVE=1\n");
     out.push_str(&format!("__RTK_BIN={}\n", shell_quote(rtk)));
+    out.push_str("__rtk_run() { \"$__RTK_BIN\" \"$@\" 2> >(grep -v -F -e 'No hook installed' -e 'run `rtk init -g`' 1>&2); }\n");
     for cmd in RTK_COMMANDS {
         out.push_str(&format!(
-            "{c}() {{ if [ -n \"$RTK_BYPASS\" ]; then command {c} \"$@\"; else \"$__RTK_BIN\" {c} \"$@\"; fi; }}\n",
+            "{c}() {{ if [ -n \"$RTK_BYPASS\" ]; then command {c} \"$@\"; else __rtk_run {c} \"$@\"; fi; }}\n",
             c = cmd
         ));
     }
