@@ -103,6 +103,16 @@ fn append_jsonl(file: &PathBuf, line: &str) {
     let _ = File::open(file).map(|f| drop(f));
 }
 
+fn project_slug() -> String {
+    std::env::var("CLAUDE_PROJECT_DIR")
+        .or_else(|_| std::env::var("GEMINI_PROJECT_DIR"))
+        .or_else(|_| std::env::var("OC_PROJECT_DIR"))
+        .or_else(|_| std::env::var("KILO_PROJECT_DIR"))
+        .map(|p| std::path::Path::new(&p).file_name()
+            .and_then(|n| n.to_str()).unwrap_or("").to_string())
+        .unwrap_or_default()
+}
+
 pub fn event(subsystem: &str, event: &str, mut fields: Value) {
     let dir = match today_dir() { Some(d) => d, None => return };
     let mut base = json!({
@@ -113,6 +123,8 @@ pub fn event(subsystem: &str, event: &str, mut fields: Value) {
     });
     let sid = session_id();
     if !sid.is_empty() { base["sess"] = json!(sid); }
+    let proj = project_slug();
+    if !proj.is_empty() { base["project"] = json!(proj); }
     if let Some(obj) = fields.as_object_mut() {
         if let Some(b) = base.as_object_mut() {
             let taken = std::mem::take(obj);
