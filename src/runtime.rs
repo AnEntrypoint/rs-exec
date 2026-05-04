@@ -523,6 +523,44 @@ fn browser_session_map_file() -> std::path::PathBuf {
     std::env::temp_dir().join("plugkit-browser-sessions.json")
 }
 
+pub fn prune_browser_session_maps() {
+    let ports_path = browser_port_map_file();
+    let sessions_path = browser_session_map_file();
+    let ports_map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&ports_path).ok()
+        .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if ports_map.is_empty() { return; }
+    let mut alive_ports = std::collections::HashSet::new();
+    let mut alive_keys = std::collections::HashSet::new();
+    for (k, v) in &ports_map {
+        let port = v.as_u64().unwrap_or(0) as u16;
+        if port == 0 { continue; }
+        if alive_ports.contains(&port) { alive_keys.insert(k.clone()); continue; }
+        if std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            std::time::Duration::from_millis(150),
+        ).is_ok() {
+            alive_ports.insert(port);
+            alive_keys.insert(k.clone());
+        }
+    }
+    let before = ports_map.len();
+    let mut new_ports = serde_json::Map::new();
+    for (k, v) in ports_map { if alive_keys.contains(&k) { new_ports.insert(k, v); } }
+    if new_ports.len() != before {
+        let _ = std::fs::write(&ports_path, serde_json::to_string(&new_ports).unwrap_or_default());
+        eprintln!("[runner] pruned plugkit-browser-ports.json {} -> {} entries", before, new_ports.len());
+    }
+    let sessions_map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&sessions_path).ok()
+        .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let s_before = sessions_map.len();
+    let mut new_sessions = serde_json::Map::new();
+    for (k, v) in sessions_map { if alive_keys.contains(&k) { new_sessions.insert(k, v); } }
+    if new_sessions.len() != s_before {
+        let _ = std::fs::write(&sessions_path, serde_json::to_string(&new_sessions).unwrap_or_default());
+        eprintln!("[runner] pruned plugkit-browser-sessions.json {} -> {} entries", s_before, new_sessions.len());
+    }
+}
+
 fn register_browser_session(claude_session_id: &str, pw_session_id: &str) {
     if claude_session_id.is_empty() || pw_session_id.is_empty() { return; }
     let path = browser_session_map_file();
@@ -1077,7 +1115,11 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                 }
             }
             remove_session_browser_port(claude_session_id);
-            kill_playwriter_ws_server();
+            // Do NOT kill the relay here — it is shared across every claude session.
+            // Killing it on a single-session eviction drops every other session's
+            // playwriter session id and is the root cause of the
+            // "disconnected from running browser" symptom. The relay only dies
+            // alongside Chrome, inside kill_stale_managed_browser / kill_session_browser.
         } else {
             let mut list_args: Vec<String> = prefix.to_vec();
             list_args.extend(["session".into(), "list".into()]);
@@ -1089,33 +1131,16 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                     .filter_map(|line| line.trim().split_whitespace().next().map(|s| s.to_string()))
                     .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()))
                     .collect();
+                // Trust TCP port-alive (already checked above) plus session-id
+                // membership in the relay's live list as authoritative liveness.
+                // The previous `playwriter -e 1` probe spawned a full process per
+                // exec:browser call and incorrectly evicted whenever the relay
+                // had been bounced; with the relay no longer killed on eviction
+                // paths, plain list-membership is the right signal.
                 for id in &owned_sessions {
                     if live_ids.contains(id) {
-                        let mut probe_args: Vec<String> = prefix.to_vec();
-                        probe_args.extend(["-s".into(), id.clone(), "--timeout".into(), "3000".into(), "-e".into(), "1".into()]);
-                        let probe_ok = no_window(Command::new(bin).args(&probe_args).current_dir(cwd)
-                            .stdout(Stdio::piped()).stderr(Stdio::piped()))
-                            .output()
-                            .map(|o| o.status.success())
-                            .unwrap_or(false);
-                        if probe_ok {
-                            eprintln!("[browser] Reusing owned session {} (liveness probe OK).", id);
-                            return Ok(id.clone());
-                        } else {
-                            eprintln!("[browser] Owned session {} listed but liveness probe failed (stale CDP UUID?); evicting.", id);
-                            let mut del_args: Vec<String> = prefix.to_vec();
-                            del_args.extend(["session".into(), "delete".into(), id.clone()]);
-                            let _ = no_window(Command::new(bin).args(&del_args).current_dir(cwd)
-                                .stdout(Stdio::null()).stderr(Stdio::null())).output();
-                            let path = browser_session_map_file();
-                            if let Ok(s) = std::fs::read_to_string(&path) {
-                                if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
-                                    map.remove(claude_session_id);
-                                    let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
-                                }
-                            }
-                            kill_playwriter_ws_server();
-                        }
+                        eprintln!("[browser] Reusing owned session {} (port-alive + listed).", id);
+                        return Ok(id.clone());
                     }
                 }
             }
@@ -1170,8 +1195,9 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
     for outer in 0..3 {
         if outer > 0 {
             eprintln!("[browser] Outer retry {} — full reset (kill + fresh port + clean profile + relaunch).", outer);
+            // kill_stale_managed_browser already invokes kill_playwriter_ws_server when it
+            // actually kills a Chrome — no need to double-kill the relay here.
             kill_stale_managed_browser(&expected_profile);
-            kill_playwriter_ws_server();
             std::thread::sleep(std::time::Duration::from_millis(800));
             for lock_name in &["lockfile", "SingletonLock", "SingletonSocket", "SingletonCookie"] {
                 let _ = std::fs::remove_file(expected_profile.join(lock_name));

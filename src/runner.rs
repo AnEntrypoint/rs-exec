@@ -158,6 +158,7 @@ fn reap_playwriter_ws_server(runner_pids: &std::collections::HashSet<u32>) {
 pub async fn run_server() -> anyhow::Result<()> {
     reap_orphaned_exec_processes();
     reap_orphaned_browsers();
+    crate::runtime::prune_browser_session_maps();
     let store = BackgroundTaskStore::new();
     let state = Arc::new(AppState { store, active: Arc::new(Mutex::new(HashMap::new())) });
     let cleanup_store = state.store.clone();
