@@ -1,22 +1,139 @@
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
-use std::{collections::HashMap, process::{Command, Stdio}, sync::Arc, env, fs, time::Duration};
+use std::{collections::HashMap, process::{Command, Stdio}, sync::Arc, env, fs, time::{Duration, Instant}};
 use crate::background_tasks::{TaskResult, TaskStatus};
 use crate::runtime::{kill_session_browser, normalize_cwd, resolve_valid_cwd};
 use crate::runner::{AppState, touch_session_activity, port_file, self_exe};
 
 pub async fn health() -> Json<Value> { Json(json!({ "ok": true })) }
 
+fn running_task_ids_for(state: &Arc<AppState>, sid: &str) -> Value {
+    if sid.is_empty() { return json!([]); }
+    let metas = state.store.running_meta_for_session(sid);
+    let arr: Vec<Value> = metas.into_iter().map(|m| json!({ "id": m.id, "cmd": m.cmd_summary, "elapsedMs": m.elapsed_ms })).collect();
+    Value::Array(arr)
+}
+
 pub async fn rpc_handler(State(state): State<Arc<AppState>>, Json(req): Json<crate::runner::RpcRequest>) -> Json<Value> {
     let params = req.params.unwrap_or(json!({}));
+    let sid = params["sessionId"].as_str().unwrap_or("").to_string();
     match handle_rpc(&state, &req.method, &params).await {
-        Ok(result) => Json(json!({ "id": req.id, "result": result })),
-        Err(e) => Json(json!({ "id": req.id, "error": { "message": e.to_string() } })),
+        Ok(mut result) => {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("running_task_ids".to_string(), running_task_ids_for(&state, &sid));
+            }
+            Json(json!({ "id": req.id, "result": result }))
+        },
+        Err(e) => Json(json!({ "id": req.id, "error": { "message": e.to_string() }, "running_task_ids": running_task_ids_for(&state, &sid) })),
     }
 }
 
 pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> anyhow::Result<Value> {
     match method {
+        "spawn" => {
+            let code = params["code"].as_str().unwrap_or("").to_string();
+            let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
+            let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();
+            let sid = params["sessionId"].as_str().unwrap_or("").to_string();
+            let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
+            if !sid.is_empty() { state.store.set_session_id(task_id, &sid); }
+            let summary: String = code.lines().next().unwrap_or("").chars().take(60).collect();
+            state.store.set_cmd_summary(task_id, &summary);
+            let log_path = crate::background_tasks::task_log_path(&sid, task_id);
+            state.store.set_log_path(task_id, log_path);
+            touch_session_activity(&sid);
+            spawn_exec_process(state, task_id, &code, &runtime, &cwd, &sid).await?;
+            Ok(json!({ "backgroundTaskId": task_id, "started": true }))
+        }
+        "tail" => {
+            let task_id = params["taskId"].as_u64().unwrap_or(0);
+            let max_wait_ms = params["maxWaitMs"].as_u64().unwrap_or(30000);
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if let Some(task_sid) = state.store.get_task_session_id(task_id) {
+                if !req_sid.is_empty() && task_sid != req_sid { return Err(anyhow::anyhow!("forbidden")); }
+            } else { return Ok(json!({ "stillRunning": false, "output": [], "exitCode": null, "notFound": true })); }
+            let waited = tokio::time::timeout(
+                Duration::from_millis(max_wait_ms),
+                state.store.wait_for_completion(task_id),
+            ).await;
+            let still_running = waited.is_err();
+            let output: Vec<Value> = state.store.get_and_clear_output(task_id).iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
+            let (status, exit_code) = match state.store.get_task_status(task_id) {
+                Some((TaskStatus::Completed, Some(r))) => ("completed", Some(r.exit_code)),
+                Some((TaskStatus::Failed, Some(r))) => ("failed", Some(r.exit_code)),
+                Some((TaskStatus::Running, _)) => ("running", None),
+                _ => ("pending", None),
+            };
+            Ok(json!({ "backgroundTaskId": task_id, "stillRunning": still_running, "status": status, "exitCode": exit_code, "output": output }))
+        }
+        "watch" => {
+            let task_id = params["taskId"].as_u64().unwrap_or(0);
+            let timeout_ms = params["timeoutMs"].as_u64().unwrap_or(30000);
+            let until_text = params["untilText"].as_str().map(|s| s.to_string());
+            let until_regex_src = params["untilRegex"].as_str().map(|s| s.to_string());
+            if until_text.is_none() && until_regex_src.is_none() {
+                return Err(anyhow::anyhow!("watch requires untilText or untilRegex"));
+            }
+            let until_regex = match &until_regex_src {
+                Some(s) => Some(regex::Regex::new(s).map_err(|e| anyhow::anyhow!("bad regex: {}", e))?),
+                None => None,
+            };
+            let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if let Some(task_sid) = state.store.get_task_session_id(task_id) {
+                if !req_sid.is_empty() && task_sid != req_sid { return Err(anyhow::anyhow!("forbidden")); }
+            } else { return Ok(json!({ "matched": false, "stillRunning": false, "notFound": true })); }
+            let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+            let mut buf = String::new();
+            let mut matched = false;
+            let mut match_text = String::new();
+            let mut output_acc: Vec<Value> = Vec::new();
+            loop {
+                let entries = state.store.get_and_clear_output(task_id);
+                for e in &entries {
+                    buf.push_str(&e.data);
+                    output_acc.push(json!({ "s": e.stream, "d": e.data }));
+                }
+                if let Some(t) = &until_text {
+                    if let Some(idx) = buf.find(t.as_str()) {
+                        matched = true;
+                        let end = (idx + t.len()).min(buf.len());
+                        match_text = buf[idx..end].to_string();
+                        break;
+                    }
+                }
+                if let Some(re) = &until_regex {
+                    if let Some(m) = re.find(&buf) { matched = true; match_text = m.as_str().to_string(); break; }
+                }
+                let done = matches!(state.store.get_task_status(task_id), Some((TaskStatus::Completed, _)) | Some((TaskStatus::Failed, _)));
+                if done { break; }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { break; }
+                let chunk = remaining.min(Duration::from_millis(100));
+                let _ = state.store.wait_for_output(task_id, chunk.as_millis() as u64).await;
+                if Instant::now() >= deadline { break; }
+            }
+            let still_running = !matches!(state.store.get_task_status(task_id), Some((TaskStatus::Completed, _)) | Some((TaskStatus::Failed, _)));
+            let timed_out = !matched && Instant::now() >= deadline;
+            Ok(json!({ "backgroundTaskId": task_id, "matched": matched, "matchText": match_text, "timedOut": timed_out, "stillRunning": still_running, "output": output_acc }))
+        }
+        "wait" => {
+            let ms = params["durationMs"].as_u64().unwrap_or(0);
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            Ok(json!({ "waited": true, "durationMs": ms }))
+        }
+        "killSessionTasks" => {
+            let sid = params["sessionId"].as_str().unwrap_or("");
+            if sid.is_empty() { return Ok(json!({ "killed": 0 })); }
+            let task_ids = state.store.session_task_ids(sid);
+            let pids: Vec<u32> = { let mut a = state.active.lock().unwrap(); task_ids.iter().filter_map(|id| a.remove(id).map(|(pid, stdin)| { drop(stdin); pid })).collect() };
+            for pid in &pids { crate::kill::kill_tree(*pid); }
+            for id in &task_ids {
+                if matches!(state.store.get_task_status(*id), Some((TaskStatus::Pending, _)) | Some((TaskStatus::Running, _))) {
+                    state.store.fail_task(*id, "session ended".into());
+                }
+            }
+            Ok(json!({ "killed": pids.len(), "taskIds": task_ids }))
+        }
         "execute" => {
             let timeout_ms = match params["timeoutMs"].as_u64() {
                 Some(n) if n > 0 => n,
@@ -28,6 +145,10 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
             if let Some(sid) = params["sessionId"].as_str() { state.store.set_session_id(task_id, sid); }
             let sid = params["sessionId"].as_str().unwrap_or("").to_string();
+            let summary: String = code.lines().next().unwrap_or("").chars().take(60).collect();
+            state.store.set_cmd_summary(task_id, &summary);
+            let log_path = crate::background_tasks::task_log_path(&sid, task_id);
+            state.store.set_log_path(task_id, log_path);
             touch_session_activity(&sid);
             spawn_exec_process(state, task_id, &code, &runtime, &cwd, &sid).await?;
             let waited = tokio::time::timeout(

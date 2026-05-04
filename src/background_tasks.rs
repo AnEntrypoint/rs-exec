@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::ChildStdin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,11 +15,29 @@ pub struct OutputEntry { pub stream: String, pub data: String }
 #[derive(Debug, Clone)]
 pub struct TaskResult { pub success: bool, pub stdout: String, pub stderr: String, pub error: Option<String>, pub exit_code: i32 }
 
+#[derive(Debug, Clone)]
+pub struct RunningTaskMeta { pub id: u64, pub cmd_summary: String, pub elapsed_ms: u128 }
+
+pub fn task_log_path(session_id: &str, task_id: u64) -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let sid_dir = if session_id.is_empty() { "no-session".to_string() } else { session_id.to_string() };
+    home.join(".claude").join("gm-log").join("tasks").join(sid_dir).join(format!("{}.log", task_id))
+}
+
+pub fn append_logfile(path: &Path, stream: &str, data: &str) {
+    use std::io::Write;
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "[{}] {}", stream, data.trim_end_matches('\n'));
+    }
+}
+
 #[derive(Debug)]
 pub struct Task {
     pub id: u64, pub status: TaskStatus, pub result: Option<TaskResult>,
     pub output_log: Vec<OutputEntry>, pub created_at: Instant,
     pub completed_at: Option<Instant>, pub session_id: Option<String>,
+    pub log_path: Option<PathBuf>, pub cmd_summary: String,
 }
 
 pub struct BackgroundTaskStore {
@@ -34,8 +53,31 @@ impl BackgroundTaskStore {
 
     pub fn create_task(&self) -> u64 {
         let mut c = self.counter.lock().unwrap(); *c += 1; let id = *c;
-        self.tasks.lock().unwrap().insert(id, Task { id, status: TaskStatus::Pending, result: None, output_log: vec![], created_at: Instant::now(), completed_at: None, session_id: None });
+        self.tasks.lock().unwrap().insert(id, Task { id, status: TaskStatus::Pending, result: None, output_log: vec![], created_at: Instant::now(), completed_at: None, session_id: None, log_path: None, cmd_summary: String::new() });
         id
+    }
+
+    pub fn set_log_path(&self, id: u64, p: PathBuf) {
+        if let Some(t) = self.tasks.lock().unwrap().get_mut(&id) { t.log_path = Some(p); }
+    }
+
+    pub fn get_log_path(&self, id: u64) -> Option<PathBuf> {
+        self.tasks.lock().unwrap().get(&id).and_then(|t| t.log_path.clone())
+    }
+
+    pub fn set_cmd_summary(&self, id: u64, s: &str) {
+        if let Some(t) = self.tasks.lock().unwrap().get_mut(&id) {
+            let trimmed: String = s.chars().take(60).collect();
+            t.cmd_summary = trimmed;
+        }
+    }
+
+    pub fn running_meta_for_session(&self, sid: &str) -> Vec<RunningTaskMeta> {
+        let now = Instant::now();
+        self.tasks.lock().unwrap().values()
+            .filter(|t| t.session_id.as_deref() == Some(sid) && matches!(t.status, TaskStatus::Pending | TaskStatus::Running))
+            .map(|t| RunningTaskMeta { id: t.id, cmd_summary: t.cmd_summary.clone(), elapsed_ms: now.saturating_duration_since(t.created_at).as_millis() })
+            .collect()
     }
 
     pub fn set_session_id(&self, id: u64, session_id: &str) {

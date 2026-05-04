@@ -73,6 +73,8 @@ macro_rules! seprint {
     ($($arg:tt)*) => { $crate::safe_eprint(&format!("{}", format_args!($($arg)*))) };
 }
 
+pub use background_tasks::{task_log_path, append_logfile};
+
 pub fn run_exec_process() {
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -92,7 +94,8 @@ pub fn run_exec_process() {
     let _ = std::fs::remove_file(&code_file);
     let session_id = std::env::var("SESSION_ID").unwrap_or_default();
 
-    eprintln!("[exec-process] task={} runtime={} starting", task_id, rt);
+    let log_path = background_tasks::task_log_path(&session_id, task_id);
+    eprintln!("[exec-process] task={} runtime={} starting log={}", task_id, rt, log_path.display());
 
     fn rpc_sync(port: u16, method: &str, params: serde_json::Value) {
         let body = serde_json::json!({ "method": method, "params": params }).to_string();
@@ -110,7 +113,7 @@ pub fn run_exec_process() {
         let _ = stream.read(&mut buf);
     }
 
-    fn run_child(task_id: u64, port: u16, mut child: std::process::Child) {
+    fn run_child(task_id: u64, port: u16, log_path: &std::path::Path, mut child: std::process::Child) {
         let mut out = String::new();
         let mut err = String::new();
         let mut buf = [0u8; 4096];
@@ -120,6 +123,7 @@ pub fn run_exec_process() {
                 Ok(n) => {
                     let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
                     out.push_str(&chunk);
+                    background_tasks::append_logfile(log_path, "stdout", &chunk);
                     rpc_sync(port, "appendOutput", serde_json::json!({ "taskId": task_id, "type": "stdout", "data": chunk }));
                 }
             }}
@@ -130,12 +134,14 @@ pub fn run_exec_process() {
                 Ok(n) => {
                     let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
                     err.push_str(&chunk);
+                    background_tasks::append_logfile(log_path, "stderr", &chunk);
                     rpc_sync(port, "appendOutput", serde_json::json!({ "taskId": task_id, "type": "stderr", "data": chunk }));
                 }
             }}
         }
         let code = child.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1);
         eprintln!("[exec-process] task={} child exited code={}", task_id, code);
+        background_tasks::append_logfile(log_path, "exit", &format!("code={}", code));
         rpc_sync(port, "completeTask", serde_json::json!({ "taskId": task_id, "result": { "success": code == 0, "exitCode": code, "stdout": out, "stderr": err, "error": serde_json::Value::Null } }));
     }
 
@@ -178,10 +184,10 @@ pub fn run_exec_process() {
         };
         match run_child_res {
             Err(e) => rpc_sync(port, "completeTask", serde_json::json!({ "taskId": task_id, "result": { "success": false, "exitCode": 1, "stdout": "", "stderr": e.to_string(), "error": e.to_string() } })),
-            Ok(child) => run_child(task_id, port, child),
+            Ok(child) => run_child(task_id, port, &log_path, child),
         }
     } else {
-        run_child(task_id, port, spawn_result.child);
+        run_child(task_id, port, &log_path, spawn_result.child);
     }
 
     eprintln!("[exec-process] task={} done", task_id);
