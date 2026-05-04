@@ -35,8 +35,9 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
             let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();
             let sid = params["sessionId"].as_str().unwrap_or("").to_string();
+            if sid.is_empty() { return Err(anyhow::anyhow!("sessionId required")); }
             let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
-            if !sid.is_empty() { state.store.set_session_id(task_id, &sid); }
+            state.store.set_session_id(task_id, &sid);
             let summary: String = code.lines().next().unwrap_or("").chars().take(60).collect();
             state.store.set_cmd_summary(task_id, &summary);
             let log_path = crate::background_tasks::task_log_path(&sid, task_id);
@@ -49,8 +50,9 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let task_id = params["taskId"].as_u64().unwrap_or(0);
             let max_wait_ms = params["maxWaitMs"].as_u64().unwrap_or(30000);
             let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if req_sid.is_empty() { return Err(anyhow::anyhow!("sessionId required")); }
             if let Some(task_sid) = state.store.get_task_session_id(task_id) {
-                if !req_sid.is_empty() && task_sid != req_sid { return Err(anyhow::anyhow!("forbidden")); }
+                if task_sid != req_sid { return Err(anyhow::anyhow!("forbidden")); }
             } else { return Ok(json!({ "stillRunning": false, "output": [], "exitCode": null, "notFound": true })); }
             let waited = tokio::time::timeout(
                 Duration::from_millis(max_wait_ms),
@@ -79,8 +81,9 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
                 None => None,
             };
             let req_sid = params["sessionId"].as_str().unwrap_or("");
+            if req_sid.is_empty() { return Err(anyhow::anyhow!("sessionId required")); }
             if let Some(task_sid) = state.store.get_task_session_id(task_id) {
-                if !req_sid.is_empty() && task_sid != req_sid { return Err(anyhow::anyhow!("forbidden")); }
+                if task_sid != req_sid { return Err(anyhow::anyhow!("forbidden")); }
             } else { return Ok(json!({ "matched": false, "stillRunning": false, "notFound": true })); }
             let deadline = Instant::now() + Duration::from_millis(timeout_ms);
             let mut buf = String::new();
@@ -142,9 +145,10 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let code = params["code"].as_str().unwrap_or("").to_string();
             let runtime = params["runtime"].as_str().unwrap_or("nodejs").to_string();
             let cwd = params["workingDirectory"].as_str().unwrap_or(".").to_string();
-            let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
-            if let Some(sid) = params["sessionId"].as_str() { state.store.set_session_id(task_id, sid); }
             let sid = params["sessionId"].as_str().unwrap_or("").to_string();
+            if sid.is_empty() { return Err(anyhow::anyhow!("sessionId required")); }
+            let task_id = params["backgroundTaskId"].as_u64().unwrap_or_else(|| state.store.create_task());
+            state.store.set_session_id(task_id, &sid);
             let summary: String = code.lines().next().unwrap_or("").chars().take(60).collect();
             state.store.set_cmd_summary(task_id, &summary);
             let log_path = crate::background_tasks::task_log_path(&sid, task_id);
@@ -234,12 +238,13 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
         }
         "listSessionTasks" => {
             let sid = params["sessionId"].as_str().unwrap_or("");
+            if sid.is_empty() { return Ok(json!({ "tasks": [] })); }
             let ids = state.store.session_task_ids(sid);
             let tasks_lock = state.store.list_tasks();
             let tasks: Vec<Value> = tasks_lock.iter().filter(|(id, _)| ids.contains(id)).map(|(id, s)| { let status = match s { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; json!({ "id": id, "status": status }) }).collect();
             Ok(json!({ "tasks": tasks }))
         }
-        "drainSessionOutput" => { let sid = params["sessionId"].as_str().unwrap_or(""); let entries = state.store.drain_session_output(sid); let tasks: Vec<Value> = entries.into_iter().map(|(id, status, output)| { let status_str = match status { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; let out: Vec<Value> = output.into_iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect(); json!({ "id": id, "status": status_str, "output": out }) }).collect(); Ok(json!({ "tasks": tasks })) }
+        "drainSessionOutput" => { let sid = params["sessionId"].as_str().unwrap_or(""); if sid.is_empty() { return Ok(json!({ "tasks": [] })); } let entries = state.store.drain_session_output(sid); let tasks: Vec<Value> = entries.into_iter().map(|(id, status, output)| { let status_str = match status { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; let out: Vec<Value> = output.into_iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect(); json!({ "id": id, "status": status_str, "output": out }) }).collect(); Ok(json!({ "tasks": tasks })) }
         "appendOutput" => {
             let id = params["taskId"].as_u64().unwrap_or(0);
             let req_sid = params["sessionId"].as_str().unwrap_or("");
