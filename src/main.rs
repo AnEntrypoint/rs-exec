@@ -2,6 +2,7 @@ mod daemon;
 mod background_tasks;
 mod kill;
 mod obs;
+mod spool;
 mod runtime;
 mod rpc;
 mod runner;
@@ -53,6 +54,7 @@ enum Cmd {
     Pm2list,
     #[command(name = "kill-port")] KillPort { port: u16 },
     #[command(name = "session-cleanup")] SessionCleanup { #[arg(long)] session: String },
+    Spool { #[arg(long)] once: bool },
 }
 
 async fn ensure_runner() -> anyhow::Result<()> {
@@ -189,6 +191,9 @@ async fn main() {
                 ensure_runner().await?;
                 rpc_client::rpc_call("deleteSessionTasks", json!({ "sessionId": session }), 0).await?;
                 runtime::kill_session_browser(&session);
+            }
+            Cmd::Spool { once } => {
+                if once { spool::watch_once(); } else { spool::run_daemon(); }
             }
             Cmd::Pm2list => {
                 ensure_runner().await?;
