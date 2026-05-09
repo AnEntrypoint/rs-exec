@@ -240,8 +240,13 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
             let sid = params["sessionId"].as_str().unwrap_or("");
             if sid.is_empty() { return Ok(json!({ "tasks": [] })); }
             let ids = state.store.session_task_ids(sid);
+            let metas = state.store.running_meta_for_session(sid);
             let tasks_lock = state.store.list_tasks();
-            let tasks: Vec<Value> = tasks_lock.iter().filter(|(id, _)| ids.contains(id)).map(|(id, s)| { let status = match s { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; json!({ "id": id, "status": status }) }).collect();
+            let tasks: Vec<Value> = tasks_lock.iter().filter(|(id, _)| ids.contains(id)).map(|(id, s)| {
+                let status = match s { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" };
+                let cmd = metas.iter().find(|m| m.id == *id).map(|m| m.cmd_summary.clone()).unwrap_or_default();
+                json!({ "id": id, "status": status, "cmd": cmd })
+            }).collect();
             Ok(json!({ "tasks": tasks }))
         }
         "drainSessionOutput" => { let sid = params["sessionId"].as_str().unwrap_or(""); if sid.is_empty() { return Ok(json!({ "tasks": [] })); } let entries = state.store.drain_session_output(sid); let tasks: Vec<Value> = entries.into_iter().map(|(id, status, output)| { let status_str = match status { TaskStatus::Pending => "pending", TaskStatus::Running => "running", TaskStatus::Completed => "completed", TaskStatus::Failed => "failed" }; let out: Vec<Value> = output.into_iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect(); json!({ "id": id, "status": status_str, "output": out }) }).collect(); Ok(json!({ "tasks": tasks })) }
