@@ -206,7 +206,7 @@ fn run_builtin(
     cmd.arg("exec")
         .arg("--lang").arg(lang)
         .arg("--cwd").arg(cwd)
-        .arg("--timeout").arg(timeout_ms.to_string())
+        .arg("--timeout-ms").arg(timeout_ms.to_string())
         .arg("--file").arg(code_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
