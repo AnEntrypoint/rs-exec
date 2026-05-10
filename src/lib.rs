@@ -6,6 +6,7 @@ pub mod rpc;
 pub mod rpc_client;
 pub mod runner;
 pub mod runtime;
+pub mod spool;
 
 pub const SUBCMD_SESSION_CLEANUP: &str = "session-cleanup";
 pub const SUBCMD_RUNNER: &str = "runner";
