@@ -120,51 +120,6 @@ fn wait_child_write_out(
     }
 }
 
-fn run_request(path: &Path) {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let _ = fs::remove_file(path);
-
-    let req: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            let out_path = done_dir().join(path.file_name().unwrap_or_default()).with_extension("json");
-            let _ = fs::create_dir_all(done_dir());
-            let _ = fs::write(out_path, serde_json::json!({ "ok": false, "error": e.to_string() }).to_string());
-            return;
-        }
-    };
-
-    let code = match req["code"].as_str() {
-        Some(c) => c.to_string(),
-        None => {
-            let task_id = req["taskId"].as_u64().unwrap_or(0);
-            let out_path = done_dir().join(format!("{}.json", task_id));
-            let _ = fs::create_dir_all(done_dir());
-            let _ = fs::write(out_path, serde_json::json!({ "ok": false, "error": "missing field: code" }).to_string());
-            return;
-        }
-    };
-    let lang = req["lang"].as_str().unwrap_or("nodejs").to_string();
-    let cwd = req["cwd"].as_str().unwrap_or(".").to_string();
-    let timeout_ms = req["timeoutMs"].as_u64().unwrap_or(300_000);
-    let task_id = req["taskId"].as_u64().unwrap_or(0);
-
-    let out_path = done_dir().join(format!("{}.json", task_id));
-    let log_path = log_dir().join(format!("{}.log", task_id));
-    let _ = fs::create_dir_all(done_dir());
-    let _ = fs::create_dir_all(log_dir());
-    let code_path = pending_dir().join(format!("{}.code", task_id));
-    let _ = fs::write(&code_path, &code);
-
-    std::thread::spawn(move || {
-        execute_task_streaming(&code, &lang, &cwd, &code_path, timeout_ms, task_id, out_path, log_path);
-        let _ = fs::remove_file(&code_path);
-    });
-}
-
 fn execute_task_streaming(
     code: &str,
     lang: &str,
@@ -282,21 +237,6 @@ fn run_lang_plugin(
 }
 
 const UTILITY_LANGS: &[&str] = &["recall", "codesearch", "memorize"];
-
-fn ext_to_lang(ext: &str) -> Option<&'static str> {
-    match ext {
-        "js" | "mjs" | "cjs" => Some("nodejs"),
-        "py" => Some("python"),
-        "sh" | "bash" | "zsh" => Some("bash"),
-        "ts" => Some("typescript"),
-        "go" => Some("go"),
-        "rs" => Some("rust"),
-        "ps1" => Some("powershell"),
-        "cmd" => Some("cmd"),
-        "java" => Some("java"),
-        _ => None,
-    }
-}
 
 fn is_utility_lang(lang: &str) -> bool { UTILITY_LANGS.contains(&lang) }
 
@@ -437,13 +377,7 @@ fn dispatch_entry(p: &Path) {
     let components: Vec<_> = p.components().collect();
     let n = components.len();
 
-    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
     let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-
-    if ext == "json" && stem.parse::<u64>().is_ok() {
-        run_request(p);
-        return;
-    }
 
     if n >= 2 {
         let parent_name = components[n - 2].as_os_str().to_string_lossy().to_string();
@@ -453,12 +387,19 @@ fn dispatch_entry(p: &Path) {
                 run_request_raw(p, lang_from_dir, task_id);
                 return;
             }
-        }
-    }
-
-    if let Some(lang) = ext_to_lang(ext) {
-        if let Ok(task_id) = stem.parse::<u64>() {
-            run_request_raw(p, lang.to_string(), task_id);
+        } else {
+            let warn_path = log_dir().join("watcher-warnings.log");
+            let _ = fs::create_dir_all(log_dir());
+            if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&warn_path) {
+                let _ = writeln!(
+                    f,
+                    "[{}] ignored stray file at in/ root (JSON form removed; use in/<lang>/{}.<ext>): {}",
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+                    stem,
+                    p.display()
+                );
+            }
+            let _ = fs::remove_file(p);
         }
     }
 }
