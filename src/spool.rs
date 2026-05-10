@@ -23,7 +23,24 @@ fn spool_root() -> PathBuf {
 
 fn pending_dir() -> PathBuf { spool_root().join("in") }
 fn done_dir() -> PathBuf { spool_root().join("out") }
-fn log_dir() -> PathBuf { spool_root().join("log") }
+fn out_stream_path(task_id: u64) -> PathBuf { done_dir().join(format!("{}.out", task_id)) }
+fn err_stream_path(task_id: u64) -> PathBuf { done_dir().join(format!("{}.err", task_id)) }
+fn meta_path(task_id: u64) -> PathBuf { done_dir().join(format!("{}.json", task_id)) }
+fn warn_log_path() -> PathBuf { done_dir().join(".watcher-warnings.log") }
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn truncate(p: &Path) {
+    if let Some(parent) = p.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::OpenOptions::new().create(true).write(true).truncate(true).open(p);
+}
 
 fn find_lang_plugin(lang: &str, cwd: &str) -> Option<PathBuf> {
     let filename = format!("{}.js", lang);
@@ -38,18 +55,21 @@ fn find_lang_plugin(lang: &str, cwd: &str) -> Option<PathBuf> {
 
 fn is_builtin(lang: &str) -> bool { BUILTIN_LANGS.contains(&lang) }
 
-fn stream_child_to_log(
+fn stream_child_to_files(
     stdout: std::process::ChildStdout,
     stderr: std::process::ChildStderr,
-    log_path: PathBuf,
+    out_path: PathBuf,
+    err_path: PathBuf,
 ) {
-    let log_path_err = log_path.clone();
+    truncate(&out_path);
+    truncate(&err_path);
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             if let Ok(l) = line {
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&out_path) {
                     let _ = writeln!(f, "{}", l);
+                    let _ = f.flush();
                 }
             }
         }
@@ -58,21 +78,49 @@ fn stream_child_to_log(
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
             if let Ok(l) = line {
-                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path_err) {
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&err_path) {
                     let _ = writeln!(f, "{}", l);
+                    let _ = f.flush();
                 }
             }
         }
     });
 }
 
-fn wait_child_write_out(
+fn write_meta(
+    meta_path: &Path,
+    task_id: u64,
+    lang: &str,
+    ok: bool,
+    exit_code: i32,
+    started_at_ms: u128,
+    timed_out: bool,
+    error: Option<&str>,
+) {
+    let ended = now_ms();
+    let mut v = serde_json::json!({
+        "taskId": task_id,
+        "lang": lang,
+        "ok": ok,
+        "exitCode": exit_code,
+        "durationMs": (ended - started_at_ms) as u64,
+        "timedOut": timed_out,
+        "startedAt": started_at_ms as u64,
+        "endedAt": ended as u64,
+    });
+    if let Some(e) = error {
+        v["error"] = serde_json::Value::String(e.to_string());
+    }
+    let _ = fs::write(meta_path, v.to_string());
+}
+
+fn wait_child_write_meta(
     mut child: std::process::Child,
-    out_path: PathBuf,
-    log_path: PathBuf,
+    meta_path: PathBuf,
     lang: String,
     task_id: u64,
     timeout_ms: u64,
+    started_at_ms: u128,
 ) {
     let deadline = Duration::from_millis(timeout_ms.saturating_add(5_000));
     let start = std::time::Instant::now();
@@ -81,39 +129,20 @@ fn wait_child_write_out(
             Ok(Some(status)) => {
                 let exit_code = status.code().unwrap_or(1);
                 std::thread::sleep(Duration::from_millis(100));
-                let output = fs::read_to_string(&log_path).unwrap_or_default();
-                let _ = fs::write(&out_path, serde_json::json!({
-                    "ok": exit_code == 0,
-                    "output": output,
-                    "exitCode": exit_code,
-                    "lang": lang,
-                    "taskId": task_id,
-                }).to_string());
+                write_meta(&meta_path, task_id, &lang, exit_code == 0, exit_code, started_at_ms, false, None);
                 return;
             }
             Ok(None) => {
                 if start.elapsed() >= deadline {
                     let _ = child.kill();
                     std::thread::sleep(Duration::from_millis(100));
-                    let output = fs::read_to_string(&log_path).unwrap_or_default();
-                    let _ = fs::write(&out_path, serde_json::json!({
-                        "ok": false,
-                        "timedOut": true,
-                        "output": output,
-                        "lang": lang,
-                        "taskId": task_id,
-                    }).to_string());
+                    write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, true, None);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                let _ = fs::write(&out_path, serde_json::json!({
-                    "ok": false,
-                    "error": format!("wait error: {}", e),
-                    "lang": lang,
-                    "taskId": task_id,
-                }).to_string());
+                write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, false, Some(&format!("wait error: {}", e)));
                 return;
             }
         }
@@ -127,21 +156,18 @@ fn execute_task_streaming(
     code_path: &Path,
     timeout_ms: u64,
     task_id: u64,
-    out_path: PathBuf,
-    log_path: PathBuf,
+    meta_path: PathBuf,
+    out_stream: PathBuf,
+    err_stream: PathBuf,
+    started_at_ms: u128,
 ) {
     if is_builtin(lang) {
-        run_builtin(code_path, lang, cwd, timeout_ms, task_id, out_path, log_path);
+        run_builtin(code_path, lang, cwd, timeout_ms, task_id, meta_path, out_stream, err_stream, started_at_ms);
     } else {
         match find_lang_plugin(lang, cwd) {
-            Some(plugin_path) => run_lang_plugin(&plugin_path, code, cwd, timeout_ms, task_id, out_path, log_path),
+            Some(plugin_path) => run_lang_plugin(&plugin_path, code, cwd, timeout_ms, task_id, meta_path, out_stream, err_stream, started_at_ms),
             None => {
-                let _ = fs::write(&out_path, serde_json::json!({
-                    "ok": false,
-                    "error": format!("unknown lang '{}': not a builtin and no lang plugin found", lang),
-                    "lang": lang,
-                    "taskId": task_id,
-                }).to_string());
+                write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("unknown lang '{}': not a builtin and no lang plugin found", lang)));
             }
         }
     }
@@ -153,8 +179,10 @@ fn run_builtin(
     cwd: &str,
     timeout_ms: u64,
     task_id: u64,
-    out_path: PathBuf,
-    log_path: PathBuf,
+    meta_path: PathBuf,
+    out_stream: PathBuf,
+    err_stream: PathBuf,
+    started_at_ms: u128,
 ) {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rs-exec"));
     let mut cmd = Command::new(&exe);
@@ -175,17 +203,15 @@ fn run_builtin(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = fs::write(&out_path, serde_json::json!({
-                "ok": false, "error": format!("spawn failed: {}", e), "lang": lang, "taskId": task_id,
-            }).to_string());
+            write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("spawn failed: {}", e)));
             return;
         }
     };
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    stream_child_to_log(stdout, stderr, log_path.clone());
-    wait_child_write_out(child, out_path, log_path, lang.to_string(), task_id, timeout_ms);
+    stream_child_to_files(stdout, stderr, out_stream, err_stream);
+    wait_child_write_meta(child, meta_path, lang.to_string(), task_id, timeout_ms, started_at_ms);
 }
 
 fn run_lang_plugin(
@@ -194,8 +220,10 @@ fn run_lang_plugin(
     cwd: &str,
     timeout_ms: u64,
     task_id: u64,
-    out_path: PathBuf,
-    log_path: PathBuf,
+    meta_path: PathBuf,
+    out_stream: PathBuf,
+    err_stream: PathBuf,
+    started_at_ms: u128,
 ) {
     let lang = plugin_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
     let escaped_code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string());
@@ -223,17 +251,15 @@ fn run_lang_plugin(
         Ok(c) => c,
         Err(e) => {
             let err_msg = if e.kind() == std::io::ErrorKind::NotFound { "bun not found".to_string() } else { format!("spawn failed: {}", e) };
-            let _ = fs::write(&out_path, serde_json::json!({
-                "ok": false, "error": err_msg, "lang": lang, "taskId": task_id,
-            }).to_string());
+            write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, false, Some(&err_msg));
             return;
         }
     };
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    stream_child_to_log(stdout, stderr, log_path.clone());
-    wait_child_write_out(child, out_path, log_path, lang, task_id, timeout_ms);
+    stream_child_to_files(stdout, stderr, out_stream, err_stream);
+    wait_child_write_meta(child, meta_path, lang, task_id, timeout_ms, started_at_ms);
 }
 
 const UTILITY_LANGS: &[&str] = &[
@@ -351,18 +377,16 @@ fn build_plugkit_args(verb: &str, content: &str) -> Vec<String> {
 }
 
 fn run_plugkit_verb(verb: &str, content: &str, task_id: u64) {
-    let out_path = done_dir().join(format!("{}.json", task_id));
-    let log_path = log_dir().join(format!("{}.log", task_id));
+    let meta = meta_path(task_id);
+    let out_stream = out_stream_path(task_id);
+    let err_stream = err_stream_path(task_id);
     let _ = fs::create_dir_all(done_dir());
-    let _ = fs::create_dir_all(log_dir());
-    let _ = fs::write(&log_path, "");
+    let started = now_ms();
 
     let exe = match which_plugkit() {
         Some(p) => p,
         None => {
-            let _ = fs::write(&out_path, serde_json::json!({
-                "ok": false, "error": "plugkit not found in PATH", "lang": verb, "taskId": task_id
-            }).to_string());
+            write_meta(&meta, task_id, verb, false, -1, started, false, Some("plugkit not found in PATH"));
             return;
         }
     };
@@ -371,7 +395,7 @@ fn run_plugkit_verb(verb: &str, content: &str, task_id: u64) {
     let verb_owned = verb.to_string();
 
     std::thread::spawn(move || {
-        run_subprocess_streaming(&exe, &args, &verb_owned, task_id, 300_000, out_path, log_path);
+        run_subprocess_streaming(&exe, &args, &verb_owned, task_id, 300_000, meta, out_stream, err_stream, started);
     });
 }
 
@@ -381,8 +405,10 @@ fn run_subprocess_streaming(
     lang: &str,
     task_id: u64,
     timeout_ms: u64,
-    out_path: PathBuf,
-    log_path: PathBuf,
+    meta_path: PathBuf,
+    out_stream: PathBuf,
+    err_stream: PathBuf,
+    started_at_ms: u128,
 ) {
     let mut cmd = Command::new(exe);
     for a in args { cmd.arg(a); }
@@ -396,17 +422,15 @@ fn run_subprocess_streaming(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = fs::write(&out_path, serde_json::json!({
-                "ok": false, "error": format!("spawn failed: {}", e), "lang": lang, "taskId": task_id
-            }).to_string());
+            write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("spawn failed: {}", e)));
             return;
         }
     };
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    stream_child_to_log(stdout, stderr, log_path.clone());
-    wait_child_write_out(child, out_path, log_path, lang.to_string(), task_id, timeout_ms);
+    stream_child_to_files(stdout, stderr, out_stream, err_stream);
+    wait_child_write_meta(child, meta_path, lang.to_string(), task_id, timeout_ms, started_at_ms);
 }
 
 fn run_request_raw(path: &Path, lang: String, task_id: u64) {
@@ -417,31 +441,30 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     let _ = fs::remove_file(path);
 
     if is_utility_lang(&lang) {
-        let out_path = done_dir().join(format!("{}.json", task_id));
-        let log_path = log_dir().join(format!("{}.log", task_id));
+        let meta = meta_path(task_id);
+        let out_stream = out_stream_path(task_id);
         let _ = fs::create_dir_all(done_dir());
-        let _ = fs::create_dir_all(log_dir());
+        let started = now_ms();
         match lang.as_str() {
             "wait" => {
                 let secs: u64 = code.trim().parse().unwrap_or(0);
                 if secs == 0 {
-                    let _ = fs::write(&out_path, serde_json::json!({"ok": false, "error": "exec:wait requires <seconds>", "lang": "wait", "taskId": task_id}).to_string());
+                    write_meta(&meta, task_id, "wait", false, -1, started, false, Some("exec:wait requires <seconds>"));
                     return;
                 }
                 let secs = secs.min(3600);
                 std::thread::spawn(move || {
+                    truncate(&out_stream);
                     std::thread::sleep(Duration::from_secs(secs));
-                    let _ = fs::write(&out_path, serde_json::json!({"ok": true, "output": format!("slept {}s", secs), "exitCode": 0, "lang": "wait", "taskId": task_id}).to_string());
+                    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&out_stream) {
+                        let _ = writeln!(f, "slept {}s", secs);
+                    }
+                    write_meta(&meta, task_id, "wait", true, 0, started, false, None);
                 });
                 return;
             }
             "pause" => {
-                let _ = fs::write(&out_path, serde_json::json!({
-                    "ok": false,
-                    "error": "exec:pause via spool not yet wired — pause currently mutates .gm/prd.yml via Bash hook path. Residual: spool dispatch for pause pending.",
-                    "lang": "pause",
-                    "taskId": task_id
-                }).to_string());
+                write_meta(&meta, task_id, "pause", false, -1, started, false, Some("exec:pause via spool not yet wired — pause currently mutates .gm/prd.yml via Bash hook path. Residual: spool dispatch for pause pending."));
                 return;
             }
             _ => {}
@@ -455,17 +478,17 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
         .unwrap_or_else(|_| ".".to_string());
     let timeout_ms: u64 = 300_000;
 
-    let out_path = done_dir().join(format!("{}.json", task_id));
-    let log_path = log_dir().join(format!("{}.log", task_id));
+    let meta = meta_path(task_id);
+    let out_stream = out_stream_path(task_id);
+    let err_stream = err_stream_path(task_id);
     let _ = fs::create_dir_all(done_dir());
-    let _ = fs::create_dir_all(log_dir());
-    let _ = fs::write(&log_path, "");
+    let started = now_ms();
     let code_path = pending_dir().join(format!("{}.code", task_id));
     let _ = fs::write(&code_path, &code);
 
     let code_path_clone = code_path.clone();
     std::thread::spawn(move || {
-        execute_task_streaming(&code, &lang, &cwd, &code_path_clone, timeout_ms, task_id, out_path, log_path);
+        execute_task_streaming(&code, &lang, &cwd, &code_path_clone, timeout_ms, task_id, meta, out_stream, err_stream, started);
         let _ = fs::remove_file(&code_path_clone);
     });
 }
@@ -508,8 +531,8 @@ fn dispatch_entry(p: &Path) {
                 return;
             }
         } else {
-            let warn_path = log_dir().join("watcher-warnings.log");
-            let _ = fs::create_dir_all(log_dir());
+            let warn_path = warn_log_path();
+            let _ = fs::create_dir_all(done_dir());
             if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&warn_path) {
                 let _ = writeln!(
                     f,
@@ -536,7 +559,6 @@ fn file_is_stable(p: &Path) -> bool {
 pub fn watch_once() {
     let _ = fs::create_dir_all(pending_dir());
     let _ = fs::create_dir_all(done_dir());
-    let _ = fs::create_dir_all(log_dir());
     if let Ok(rd) = fs::read_dir(pending_dir()) {
         for entry in rd.flatten() {
             let p = entry.path();
