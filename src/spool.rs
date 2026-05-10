@@ -289,6 +289,7 @@ fn run_plugkit_verb(verb: &str, content: &str, task_id: u64) {
     let log_path = log_dir().join(format!("{}.log", task_id));
     let _ = fs::create_dir_all(done_dir());
     let _ = fs::create_dir_all(log_dir());
+    let _ = fs::write(&log_path, "");
 
     let exe = match which_plugkit() {
         Some(p) => p,
@@ -363,6 +364,7 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     let log_path = log_dir().join(format!("{}.log", task_id));
     let _ = fs::create_dir_all(done_dir());
     let _ = fs::create_dir_all(log_dir());
+    let _ = fs::write(&log_path, "");
     let code_path = pending_dir().join(format!("{}.code", task_id));
     let _ = fs::write(&code_path, &code);
 
