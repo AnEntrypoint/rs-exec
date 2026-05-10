@@ -2,7 +2,125 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+static STATUS: OnceLock<Mutex<StatusState>> = OnceLock::new();
+
+fn status() -> &'static Mutex<StatusState> {
+    STATUS.get_or_init(|| Mutex::new(StatusState::new()))
+}
+
+struct StatusState {
+    started_at: String,
+    tasks_dispatched: u64,
+    last_dispatched: Option<serde_json::Value>,
+    errors_ring: std::collections::VecDeque<serde_json::Value>,
+}
+
+impl StatusState {
+    fn new() -> Self {
+        Self {
+            started_at: iso_now(),
+            tasks_dispatched: 0,
+            last_dispatched: None,
+            errors_ring: std::collections::VecDeque::with_capacity(8),
+        }
+    }
+    fn record_dispatch(&mut self, id: u64, lang: &str, input_path: &str) {
+        self.tasks_dispatched += 1;
+        self.last_dispatched = Some(serde_json::json!({
+            "id": id,
+            "lang_or_verb": lang,
+            "input_path": input_path,
+            "at": iso_now(),
+        }));
+    }
+    fn record_error(&mut self, msg: &str) {
+        if self.errors_ring.len() >= 5 { self.errors_ring.pop_front(); }
+        self.errors_ring.push_back(serde_json::json!({
+            "at": iso_now(),
+            "message": msg.chars().take(400).collect::<String>(),
+        }));
+    }
+}
+
+fn iso_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let millis = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0) % 1000) as u32;
+    let day = secs / 86_400;
+    let (y, mo, d) = civil_from_days(day as i64);
+    let rem = secs % 86_400;
+    let h = (rem / 3600) as u32;
+    let mi = ((rem % 3600) / 60) as u32;
+    let se = (rem % 60) as u32;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", y, mo, d, h, mi, se, millis)
+}
+
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
+fn count_pending_in_inbox() -> u64 {
+    let in_dir = pending_dir();
+    let mut n: u64 = 0;
+    if let Ok(rd) = fs::read_dir(&in_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() { n += 1; continue; }
+            if p.is_dir() {
+                if let Ok(sub) = fs::read_dir(&p) {
+                    n += sub.flatten().filter(|s| s.path().is_file()).count() as u64;
+                }
+            }
+        }
+    }
+    n
+}
+
+fn write_status_json() {
+    let path = spool_root().join(".status.json");
+    let guard = match status().lock() { Ok(g) => g, Err(p) => p.into_inner() };
+    let v = serde_json::json!({
+        "pid": std::process::id(),
+        "binary_version": env!("CARGO_PKG_VERSION"),
+        "started_at": guard.started_at,
+        "last_tick_at": iso_now(),
+        "tasks_dispatched_this_session": guard.tasks_dispatched,
+        "last_dispatched_task": guard.last_dispatched.clone().unwrap_or(serde_json::Value::Null),
+        "pending_in_inbox": count_pending_in_inbox(),
+        "errors_last_5": guard.errors_ring.iter().cloned().collect::<Vec<_>>(),
+    });
+    let _ = fs::write(&path, serde_json::to_string_pretty(&v).unwrap_or_default());
+}
+
+fn record_dispatch_status(id: u64, lang: &str, input_path: &str) {
+    if let Ok(mut g) = status().lock() {
+        g.record_dispatch(id, lang, input_path);
+    }
+}
+
+fn record_error_status(msg: &str) {
+    if let Ok(mut g) = status().lock() {
+        g.record_error(msg);
+    }
+}
 
 const BUILTIN_LANGS: &[&str] = &[
     "nodejs", "javascript", "node", "js",
@@ -270,6 +388,7 @@ const UTILITY_LANGS: &[&str] = &[
     "learn-status", "learn-debug", "learn-build",
     "discipline",
     "wait", "pause", "browser", "feedback",
+    "health",
 ];
 
 fn is_utility_lang(lang: &str) -> bool { UTILITY_LANGS.contains(&lang) }
@@ -371,6 +490,9 @@ fn build_plugkit_args(verb: &str, content: &str) -> Vec<String> {
         }
         "browser" => {
             vec!["browser".into(), body.to_string()]
+        }
+        "health" => {
+            vec!["health".into()]
         }
         _ => vec![verb.into(), body.to_string()],
     }
@@ -522,26 +644,33 @@ fn dispatch_entry(p: &Path) {
         if parent_name != "in" {
             let lang_from_dir = parent_name.to_lowercase();
             if let Ok(task_id) = stem.parse::<u64>() {
+                record_dispatch_status(task_id, &lang_from_dir, &p.to_string_lossy());
                 run_request_raw(p, lang_from_dir, task_id);
                 return;
             }
         } else if let Some(lang_from_ext) = ext_to_lang(ext) {
             if let Ok(task_id) = stem.parse::<u64>() {
+                record_dispatch_status(task_id, lang_from_ext, &p.to_string_lossy());
                 run_request_raw(p, lang_from_ext.to_string(), task_id);
                 return;
             }
         } else {
             let warn_path = warn_log_path();
             let _ = fs::create_dir_all(done_dir());
+            let warn_msg = format!(
+                "ignored stray file at in/ root (unknown ext; use in/<lang>/{}.<ext>): {}",
+                stem,
+                p.display()
+            );
             if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&warn_path) {
                 let _ = writeln!(
                     f,
-                    "[{}] ignored stray file at in/ root (unknown ext; use in/<lang>/{}.<ext>): {}",
+                    "[{}] {}",
                     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
-                    stem,
-                    p.display()
+                    warn_msg
                 );
             }
+            record_error_status(&warn_msg);
             let _ = fs::remove_file(p);
         }
     }
@@ -591,6 +720,7 @@ pub fn run_daemon() {
                 .unwrap_or_default()
                 .as_secs()
         ));
+        write_status_json();
         std::thread::sleep(Duration::from_millis(300));
     }
 }
