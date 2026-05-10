@@ -206,6 +206,7 @@ fn run_builtin(
     cmd.arg("exec")
         .arg("--lang").arg(lang)
         .arg("--cwd").arg(cwd)
+        .arg("--session").arg(format!("spool-{}", task_id))
         .arg("--timeout-ms").arg(timeout_ms.to_string())
         .arg("--file").arg(code_path)
         .stdout(Stdio::piped())
@@ -462,6 +463,15 @@ fn dispatch_entry(p: &Path) {
     }
 }
 
+fn file_is_stable(p: &Path) -> bool {
+    let md = match fs::metadata(p) { Ok(m) => m, Err(_) => return false };
+    let mtime = match md.modified() { Ok(t) => t, Err(_) => return false };
+    match std::time::SystemTime::now().duration_since(mtime) {
+        Ok(age) => age >= Duration::from_millis(250),
+        Err(_) => false,
+    }
+}
+
 pub fn watch_once() {
     let _ = fs::create_dir_all(pending_dir());
     let _ = fs::create_dir_all(done_dir());
@@ -470,12 +480,12 @@ pub fn watch_once() {
         for entry in rd.flatten() {
             let p = entry.path();
             if p.is_file() {
-                dispatch_entry(&p);
+                if file_is_stable(&p) { dispatch_entry(&p); }
             } else if p.is_dir() {
                 if let Ok(sub) = fs::read_dir(&p) {
                     for sub_entry in sub.flatten() {
                         let sp = sub_entry.path();
-                        if sp.is_file() { dispatch_entry(&sp); }
+                        if sp.is_file() && file_is_stable(&sp) { dispatch_entry(&sp); }
                     }
                 }
             }
