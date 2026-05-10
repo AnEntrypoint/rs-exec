@@ -243,6 +243,7 @@ const UTILITY_LANGS: &[&str] = &[
     "forget",
     "learn-status", "learn-debug", "learn-build",
     "discipline",
+    "wait", "pause", "browser", "feedback",
 ];
 
 fn is_utility_lang(lang: &str) -> bool { UTILITY_LANGS.contains(&lang) }
@@ -339,6 +340,12 @@ fn build_plugkit_args(verb: &str, content: &str) -> Vec<String> {
             if !body.is_empty() { v.push(body.to_string()); }
             v
         }
+        "feedback" => {
+            vec!["learn".into(), "feedback".into(), body.to_string()]
+        }
+        "browser" => {
+            vec!["browser".into(), body.to_string()]
+        }
         _ => vec![verb.into(), body.to_string()],
     }
 }
@@ -410,6 +417,35 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     let _ = fs::remove_file(path);
 
     if is_utility_lang(&lang) {
+        let out_path = done_dir().join(format!("{}.json", task_id));
+        let log_path = log_dir().join(format!("{}.log", task_id));
+        let _ = fs::create_dir_all(done_dir());
+        let _ = fs::create_dir_all(log_dir());
+        match lang.as_str() {
+            "wait" => {
+                let secs: u64 = code.trim().parse().unwrap_or(0);
+                if secs == 0 {
+                    let _ = fs::write(&out_path, serde_json::json!({"ok": false, "error": "exec:wait requires <seconds>", "lang": "wait", "taskId": task_id}).to_string());
+                    return;
+                }
+                let secs = secs.min(3600);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(secs));
+                    let _ = fs::write(&out_path, serde_json::json!({"ok": true, "output": format!("slept {}s", secs), "exitCode": 0, "lang": "wait", "taskId": task_id}).to_string());
+                });
+                return;
+            }
+            "pause" => {
+                let _ = fs::write(&out_path, serde_json::json!({
+                    "ok": false,
+                    "error": "exec:pause via spool not yet wired — pause currently mutates .gm/prd.yml via Bash hook path. Residual: spool dispatch for pause pending.",
+                    "lang": "pause",
+                    "taskId": task_id
+                }).to_string());
+                return;
+            }
+            _ => {}
+        }
         run_plugkit_verb(&lang, &code, task_id);
         return;
     }
@@ -434,11 +470,29 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     });
 }
 
+fn ext_to_lang(ext: &str) -> Option<&'static str> {
+    match ext.to_lowercase().as_str() {
+        "js" | "mjs" | "cjs" => Some("nodejs"),
+        "py" => Some("python"),
+        "sh" | "bash" => Some("bash"),
+        "ts" => Some("typescript"),
+        "go" => Some("go"),
+        "rs" => Some("rust"),
+        "c" => Some("c"),
+        "cpp" | "cc" | "cxx" => Some("cpp"),
+        "java" => Some("java"),
+        "ps1" => Some("powershell"),
+        "cmd" | "bat" => Some("cmd"),
+        _ => None,
+    }
+}
+
 fn dispatch_entry(p: &Path) {
     let components: Vec<_> = p.components().collect();
     let n = components.len();
 
     let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
 
     if n >= 2 {
         let parent_name = components[n - 2].as_os_str().to_string_lossy().to_string();
@@ -448,13 +502,18 @@ fn dispatch_entry(p: &Path) {
                 run_request_raw(p, lang_from_dir, task_id);
                 return;
             }
+        } else if let Some(lang_from_ext) = ext_to_lang(ext) {
+            if let Ok(task_id) = stem.parse::<u64>() {
+                run_request_raw(p, lang_from_ext.to_string(), task_id);
+                return;
+            }
         } else {
             let warn_path = log_dir().join("watcher-warnings.log");
             let _ = fs::create_dir_all(log_dir());
             if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&warn_path) {
                 let _ = writeln!(
                     f,
-                    "[{}] ignored stray file at in/ root (JSON form removed; use in/<lang>/{}.<ext>): {}",
+                    "[{}] ignored stray file at in/ root (unknown ext; use in/<lang>/{}.<ext>): {}",
                     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
                     stem,
                     p.display()
