@@ -532,7 +532,7 @@ pub fn prune_browser_session_maps() {
     let mut alive_ports = std::collections::HashSet::new();
     let mut alive_keys = std::collections::HashSet::new();
     for (k, v) in &ports_map {
-        let port = v.as_u64().unwrap_or(0) as u16;
+        let port = (v.as_u64().or_else(|| v.get("port").and_then(|p| p.as_u64())).unwrap_or(0)) as u16;
         if port == 0 { continue; }
         if alive_ports.contains(&port) { alive_keys.insert(k.clone()); continue; }
         if std::net::TcpStream::connect_timeout(
@@ -707,14 +707,30 @@ fn browser_port_map_file() -> std::path::PathBuf {
     std::env::temp_dir().join("plugkit-browser-ports.json")
 }
 
-fn get_session_browser_port(claude_session_id: &str) -> Option<u16> {
+fn get_session_browser_entry(claude_session_id: &str) -> Option<serde_json::Value> {
     let path = browser_port_map_file();
     std::fs::read_to_string(&path).ok()
         .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s).ok())
-        .and_then(|m| m.get(claude_session_id).and_then(|v| v.as_u64()).map(|p| p as u16))
+        .and_then(|m| m.get(claude_session_id).cloned())
+}
+
+fn get_session_browser_port(claude_session_id: &str) -> Option<u16> {
+    let entry = get_session_browser_entry(claude_session_id)?;
+    if let Some(p) = entry.as_u64() { return Some(p as u16); }
+    entry.get("port").and_then(|v| v.as_u64()).map(|p| p as u16)
+}
+
+fn get_session_browser_profile_dir(claude_session_id: &str) -> Option<std::path::PathBuf> {
+    let entry = get_session_browser_entry(claude_session_id)?;
+    let s = entry.get("profileDir")?.as_str()?;
+    Some(std::path::PathBuf::from(s))
 }
 
 fn set_session_browser_port(claude_session_id: &str, port: u16) {
+    set_session_browser_port_and_profile(claude_session_id, port, None);
+}
+
+fn set_session_browser_port_and_profile(claude_session_id: &str, port: u16, profile_dir: Option<&std::path::Path>) {
     if claude_session_id.is_empty() { return; }
     let path = browser_port_map_file();
     let mut map: serde_json::Map<String, serde_json::Value> = std::fs::read_to_string(&path)
@@ -722,7 +738,20 @@ fn set_session_browser_port(claude_session_id: &str, port: u16) {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     map.remove("");
-    map.insert(claude_session_id.to_string(), serde_json::Value::Number(serde_json::Number::from(port)));
+    let entry = if let Some(pd) = profile_dir {
+        serde_json::json!({ "port": port, "profileDir": pd.to_string_lossy().as_ref() })
+    } else {
+        let existing_profile = map.get(claude_session_id)
+            .and_then(|v| v.get("profileDir"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(ep) = existing_profile {
+            serde_json::json!({ "port": port, "profileDir": ep })
+        } else {
+            serde_json::json!({ "port": port })
+        }
+    };
+    map.insert(claude_session_id.to_string(), entry);
     let _ = std::fs::write(&path, serde_json::to_string(&map).unwrap_or_default());
 }
 
@@ -738,6 +767,7 @@ fn remove_session_browser_port(claude_session_id: &str) {
 
 pub fn kill_session_browser(claude_session_id: &str) {
     if let Some(port) = get_session_browser_port(claude_session_id) {
+        let profile_dir = get_session_browser_profile_dir(claude_session_id);
         let mut sys = sysinfo::System::new();
         sys.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
         let port_arg = format!("--remote-debugging-port={}", port);
@@ -753,7 +783,20 @@ pub fn kill_session_browser(claude_session_id: &str) {
             eprintln!("[browser] Killing idle session browser pid tree {} on port {} for session {}.", pid, port, claude_session_id);
             crate::kill::kill_tree(pid);
         }
-        if killed_any { kill_playwriter_ws_server(); }
+        if killed_any {
+            kill_playwriter_ws_server();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        if let Some(ref pd) = profile_dir {
+            let pd_str = pd.to_string_lossy();
+            let is_per_pid = pd_str.contains(".plugkit-browser-profile-");
+            if is_per_pid && pd.exists() {
+                match std::fs::remove_dir_all(pd) {
+                    Ok(()) => eprintln!("[browser] Removed per-pid profile dir {} for session {}.", pd.display(), claude_session_id),
+                    Err(e) => eprintln!("[browser] Could not remove per-pid profile dir {}: {} (may still be locked).", pd.display(), e),
+                }
+            }
+        }
         let port_path = browser_port_map_file();
         if let Ok(s) = std::fs::read_to_string(&port_path) {
             if let Ok(mut map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s) {
@@ -1166,7 +1209,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
                 if let Some(id) = try_new_session(bin, prefix, cwd, Some(&format!("--direct=localhost:{}", p))) {
                     eprintln!("[browser] Reconnected to existing session browser on port {} after relay restart.", p);
                     register_browser_session(claude_session_id, &id);
-                    set_session_browser_port(claude_session_id, p);
+                    set_session_browser_port_and_profile(claude_session_id, p, Some(&expected_profile));
                     return Ok(id);
                 }
             }
@@ -1205,7 +1248,7 @@ fn get_or_create_browser_session(bin: &str, prefix: &[String], cwd: &str, claude
             current_port = find_free_port(current_port + 1);
         }
         launch_managed_browser(&exe, current_port, cwd)?;
-        set_session_browser_port(claude_session_id, current_port);
+        set_session_browser_port_and_profile(claude_session_id, current_port, Some(&expected_profile));
 
         eprintln!("[browser] Waiting for managed browser on port {}...", current_port);
         let direct_arg = format!("--direct=localhost:{}", current_port);
