@@ -484,8 +484,20 @@ pub fn watch_once() {
 }
 
 pub fn run_daemon() {
+    let root = spool_root();
+    let _ = fs::create_dir_all(&root);
+    let pid_path = root.join(".watcher.pid");
+    let hb_path = root.join(".watcher.heartbeat");
+    let _ = fs::write(&pid_path, std::process::id().to_string());
     loop {
         watch_once();
+        let _ = fs::write(&hb_path, format!(
+            "{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        ));
         std::thread::sleep(Duration::from_millis(300));
     }
 }
