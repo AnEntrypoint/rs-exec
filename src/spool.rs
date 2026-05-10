@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -21,31 +21,103 @@ fn spool_root() -> PathBuf {
     std::env::temp_dir().join("rs-exec-spool")
 }
 
-fn pending_dir() -> PathBuf {
-    spool_root().join("in")
-}
-
-fn done_dir() -> PathBuf {
-    spool_root().join("out")
-}
+fn pending_dir() -> PathBuf { spool_root().join("in") }
+fn done_dir() -> PathBuf { spool_root().join("out") }
+fn log_dir() -> PathBuf { spool_root().join("log") }
 
 fn find_lang_plugin(lang: &str, cwd: &str) -> Option<PathBuf> {
     let filename = format!("{}.js", lang);
     let project_plugin = PathBuf::from(cwd).join("lang").join(&filename);
-    if project_plugin.exists() {
-        return Some(project_plugin);
-    }
+    if project_plugin.exists() { return Some(project_plugin); }
     if let Ok(plugin_root) = std::env::var("CLAUDE_PLUGIN_ROOT") {
         let global_plugin = PathBuf::from(plugin_root).join("lang").join(&filename);
-        if global_plugin.exists() {
-            return Some(global_plugin);
-        }
+        if global_plugin.exists() { return Some(global_plugin); }
     }
     None
 }
 
-fn is_builtin(lang: &str) -> bool {
-    BUILTIN_LANGS.contains(&lang)
+fn is_builtin(lang: &str) -> bool { BUILTIN_LANGS.contains(&lang) }
+
+fn stream_child_to_log(
+    stdout: std::process::ChildStdout,
+    stderr: std::process::ChildStderr,
+    log_path: PathBuf,
+) {
+    let log_path_err = log_path.clone();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                    let _ = writeln!(f, "{}", l);
+                }
+            }
+        }
+    });
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path_err) {
+                    let _ = writeln!(f, "{}", l);
+                }
+            }
+        }
+    });
+}
+
+fn wait_child_write_out(
+    mut child: std::process::Child,
+    out_path: PathBuf,
+    log_path: PathBuf,
+    lang: String,
+    task_id: u64,
+    timeout_ms: u64,
+) {
+    let deadline = Duration::from_millis(timeout_ms.saturating_add(5_000));
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let exit_code = status.code().unwrap_or(1);
+                std::thread::sleep(Duration::from_millis(100));
+                let output = fs::read_to_string(&log_path).unwrap_or_default();
+                let _ = fs::write(&out_path, serde_json::json!({
+                    "ok": exit_code == 0,
+                    "output": output,
+                    "exitCode": exit_code,
+                    "lang": lang,
+                    "taskId": task_id,
+                }).to_string());
+                return;
+            }
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    let _ = child.kill();
+                    std::thread::sleep(Duration::from_millis(100));
+                    let output = fs::read_to_string(&log_path).unwrap_or_default();
+                    let _ = fs::write(&out_path, serde_json::json!({
+                        "ok": false,
+                        "timedOut": true,
+                        "output": output,
+                        "lang": lang,
+                        "taskId": task_id,
+                    }).to_string());
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = fs::write(&out_path, serde_json::json!({
+                    "ok": false,
+                    "error": format!("wait error: {}", e),
+                    "lang": lang,
+                    "taskId": task_id,
+                }).to_string());
+                return;
+            }
+        }
+    }
 }
 
 fn run_request(path: &Path) {
@@ -81,41 +153,41 @@ fn run_request(path: &Path) {
     let task_id = req["taskId"].as_u64().unwrap_or(0);
 
     let out_path = done_dir().join(format!("{}.json", task_id));
+    let log_path = log_dir().join(format!("{}.log", task_id));
     let _ = fs::create_dir_all(done_dir());
+    let _ = fs::create_dir_all(log_dir());
     let code_path = pending_dir().join(format!("{}.code", task_id));
     let _ = fs::write(&code_path, &code);
 
-    let out_path_clone = out_path.clone();
-    let code_path_clone = code_path.clone();
-    let lang_clone = lang.clone();
-    let cwd_clone = cwd.clone();
-
     std::thread::spawn(move || {
-        let result = execute_task(&code, &lang_clone, &cwd_clone, &code_path_clone, timeout_ms, task_id);
-        let _ = fs::remove_file(&code_path_clone);
-        let _ = fs::write(&out_path_clone, result.to_string());
+        execute_task_streaming(&code, &lang, &cwd, &code_path, timeout_ms, task_id, out_path, log_path);
+        let _ = fs::remove_file(&code_path);
     });
 }
 
-fn execute_task(
+fn execute_task_streaming(
     code: &str,
     lang: &str,
     cwd: &str,
     code_path: &Path,
     timeout_ms: u64,
     task_id: u64,
-) -> serde_json::Value {
+    out_path: PathBuf,
+    log_path: PathBuf,
+) {
     if is_builtin(lang) {
-        run_builtin(code_path, lang, cwd, timeout_ms, task_id)
+        run_builtin(code_path, lang, cwd, timeout_ms, task_id, out_path, log_path);
     } else {
         match find_lang_plugin(lang, cwd) {
-            Some(plugin_path) => run_lang_plugin(&plugin_path, code, cwd, timeout_ms, task_id),
-            None => serde_json::json!({
-                "ok": false,
-                "error": format!("unknown lang '{}': not a builtin and no lang plugin found", lang),
-                "lang": lang,
-                "taskId": task_id,
-            }),
+            Some(plugin_path) => run_lang_plugin(&plugin_path, code, cwd, timeout_ms, task_id, out_path, log_path),
+            None => {
+                let _ = fs::write(&out_path, serde_json::json!({
+                    "ok": false,
+                    "error": format!("unknown lang '{}': not a builtin and no lang plugin found", lang),
+                    "lang": lang,
+                    "taskId": task_id,
+                }).to_string());
+            }
         }
     }
 }
@@ -126,7 +198,9 @@ fn run_builtin(
     cwd: &str,
     timeout_ms: u64,
     task_id: u64,
-) -> serde_json::Value {
+    out_path: PathBuf,
+    log_path: PathBuf,
+) {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rs-exec"));
     let mut cmd = Command::new(&exe);
     cmd.arg("exec")
@@ -144,68 +218,18 @@ fn run_builtin(
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return serde_json::json!({
-            "ok": false,
-            "error": format!("spawn failed: {}", e),
-            "lang": lang,
-            "taskId": task_id,
-        }),
+        Err(e) => {
+            let _ = fs::write(&out_path, serde_json::json!({
+                "ok": false, "error": format!("spawn failed: {}", e), "lang": lang, "taskId": task_id,
+            }).to_string());
+            return;
+        }
     };
 
-    let deadline = Duration::from_millis(timeout_ms.saturating_add(5_000));
-    let start = std::time::Instant::now();
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let exit_code = status.code().unwrap_or(1);
-                let mut stdout_buf = Vec::new();
-                let mut stderr_buf = Vec::new();
-                if let Some(mut s) = child.stdout.take() { let _ = s.read_to_end(&mut stdout_buf); }
-                if let Some(mut s) = child.stderr.take() { let _ = s.read_to_end(&mut stderr_buf); }
-                let combined = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&stdout_buf),
-                    String::from_utf8_lossy(&stderr_buf)
-                );
-                return serde_json::json!({
-                    "ok": exit_code == 0,
-                    "output": combined,
-                    "exitCode": exit_code,
-                    "lang": lang,
-                    "taskId": task_id,
-                });
-            }
-            Ok(None) => {
-                if start.elapsed() >= deadline {
-                    let _ = child.kill();
-                    let mut stdout_buf = Vec::new();
-                    let mut stderr_buf = Vec::new();
-                    if let Some(mut s) = child.stdout.take() { let _ = s.read_to_end(&mut stdout_buf); }
-                    if let Some(mut s) = child.stderr.take() { let _ = s.read_to_end(&mut stderr_buf); }
-                    let partial = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&stdout_buf),
-                        String::from_utf8_lossy(&stderr_buf)
-                    );
-                    return serde_json::json!({
-                        "ok": false,
-                        "timedOut": true,
-                        "output": format!("partial...\n{}", partial),
-                        "lang": lang,
-                        "taskId": task_id,
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return serde_json::json!({
-                "ok": false,
-                "error": format!("wait error: {}", e),
-                "lang": lang,
-                "taskId": task_id,
-            }),
-        }
-    }
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    stream_child_to_log(stdout, stderr, log_path.clone());
+    wait_child_write_out(child, out_path, log_path, lang.to_string(), task_id, timeout_ms);
 }
 
 fn run_lang_plugin(
@@ -214,7 +238,9 @@ fn run_lang_plugin(
     cwd: &str,
     timeout_ms: u64,
     task_id: u64,
-) -> serde_json::Value {
+    out_path: PathBuf,
+    log_path: PathBuf,
+) {
     let lang = plugin_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
     let escaped_code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string());
     let escaped_cwd = serde_json::to_string(cwd).unwrap_or_else(|_| "\"\"".to_string());
@@ -240,77 +266,18 @@ fn run_lang_plugin(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                return serde_json::json!({
-                    "ok": false,
-                    "error": "bun not found",
-                    "lang": lang,
-                    "taskId": task_id,
-                });
-            }
-            return serde_json::json!({
-                "ok": false,
-                "error": format!("spawn failed: {}", e),
-                "lang": lang,
-                "taskId": task_id,
-            });
+            let err_msg = if e.kind() == std::io::ErrorKind::NotFound { "bun not found".to_string() } else { format!("spawn failed: {}", e) };
+            let _ = fs::write(&out_path, serde_json::json!({
+                "ok": false, "error": err_msg, "lang": lang, "taskId": task_id,
+            }).to_string());
+            return;
         }
     };
 
-    let deadline = Duration::from_millis(timeout_ms.saturating_add(5_000));
-    let start = std::time::Instant::now();
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let exit_code = status.code().unwrap_or(1);
-                let mut stdout_buf = Vec::new();
-                let mut stderr_buf = Vec::new();
-                if let Some(mut s) = child.stdout.take() { let _ = s.read_to_end(&mut stdout_buf); }
-                if let Some(mut s) = child.stderr.take() { let _ = s.read_to_end(&mut stderr_buf); }
-                let combined = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&stdout_buf),
-                    String::from_utf8_lossy(&stderr_buf)
-                );
-                return serde_json::json!({
-                    "ok": exit_code == 0,
-                    "output": combined,
-                    "exitCode": exit_code,
-                    "lang": lang,
-                    "taskId": task_id,
-                });
-            }
-            Ok(None) => {
-                if start.elapsed() >= deadline {
-                    let _ = child.kill();
-                    let mut stdout_buf = Vec::new();
-                    let mut stderr_buf = Vec::new();
-                    if let Some(mut s) = child.stdout.take() { let _ = s.read_to_end(&mut stdout_buf); }
-                    if let Some(mut s) = child.stderr.take() { let _ = s.read_to_end(&mut stderr_buf); }
-                    let partial = format!(
-                        "{}{}",
-                        String::from_utf8_lossy(&stdout_buf),
-                        String::from_utf8_lossy(&stderr_buf)
-                    );
-                    return serde_json::json!({
-                        "ok": false,
-                        "timedOut": true,
-                        "output": format!("partial...\n{}", partial),
-                        "lang": lang,
-                        "taskId": task_id,
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return serde_json::json!({
-                "ok": false,
-                "error": format!("wait error: {}", e),
-                "lang": lang,
-                "taskId": task_id,
-            }),
-        }
-    }
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    stream_child_to_log(stdout, stderr, log_path.clone());
+    wait_child_write_out(child, out_path, log_path, lang, task_id, timeout_ms);
 }
 
 const UTILITY_LANGS: &[&str] = &["recall", "codesearch", "memorize"];
@@ -330,9 +297,7 @@ fn ext_to_lang(ext: &str) -> Option<&'static str> {
     }
 }
 
-fn is_utility_lang(lang: &str) -> bool {
-    UTILITY_LANGS.contains(&lang)
-}
+fn is_utility_lang(lang: &str) -> bool { UTILITY_LANGS.contains(&lang) }
 
 fn which_plugkit() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("CLAUDE_PLUGIN_ROOT") {
@@ -380,7 +345,9 @@ fn build_plugkit_args(verb: &str, content: &str) -> Vec<String> {
 
 fn run_plugkit_verb(verb: &str, content: &str, task_id: u64) {
     let out_path = done_dir().join(format!("{}.json", task_id));
+    let log_path = log_dir().join(format!("{}.log", task_id));
     let _ = fs::create_dir_all(done_dir());
+    let _ = fs::create_dir_all(log_dir());
 
     let exe = match which_plugkit() {
         Some(p) => p,
@@ -396,12 +363,19 @@ fn run_plugkit_verb(verb: &str, content: &str, task_id: u64) {
     let verb_owned = verb.to_string();
 
     std::thread::spawn(move || {
-        let result = run_subprocess(&exe, &args, &verb_owned, task_id, 300_000);
-        let _ = fs::write(&out_path, result.to_string());
+        run_subprocess_streaming(&exe, &args, &verb_owned, task_id, 300_000, out_path, log_path);
     });
 }
 
-fn run_subprocess(exe: &Path, args: &[String], lang: &str, task_id: u64, timeout_ms: u64) -> serde_json::Value {
+fn run_subprocess_streaming(
+    exe: &Path,
+    args: &[String],
+    lang: &str,
+    task_id: u64,
+    timeout_ms: u64,
+    out_path: PathBuf,
+    log_path: PathBuf,
+) {
     let mut cmd = Command::new(exe);
     for a in args { cmd.arg(a); }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -413,42 +387,18 @@ fn run_subprocess(exe: &Path, args: &[String], lang: &str, task_id: u64, timeout
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return serde_json::json!({
-            "ok": false, "error": format!("spawn failed: {}", e), "lang": lang, "taskId": task_id
-        }),
+        Err(e) => {
+            let _ = fs::write(&out_path, serde_json::json!({
+                "ok": false, "error": format!("spawn failed: {}", e), "lang": lang, "taskId": task_id
+            }).to_string());
+            return;
+        }
     };
 
-    let deadline = Duration::from_millis(timeout_ms.saturating_add(5_000));
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let exit_code = status.code().unwrap_or(1);
-                let mut out = Vec::new();
-                let mut err = Vec::new();
-                if let Some(mut s) = child.stdout.take() { let _ = s.read_to_end(&mut out); }
-                if let Some(mut s) = child.stderr.take() { let _ = s.read_to_end(&mut err); }
-                let combined = format!("{}{}", String::from_utf8_lossy(&out), String::from_utf8_lossy(&err));
-                return serde_json::json!({
-                    "ok": exit_code == 0,
-                    "output": combined,
-                    "exitCode": exit_code,
-                    "lang": lang,
-                    "taskId": task_id,
-                });
-            }
-            Ok(None) => {
-                if start.elapsed() >= deadline {
-                    let _ = child.kill();
-                    return serde_json::json!({ "ok": false, "timedOut": true, "lang": lang, "taskId": task_id });
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return serde_json::json!({
-                "ok": false, "error": format!("wait: {}", e), "lang": lang, "taskId": task_id
-            }),
-        }
-    }
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    stream_child_to_log(stdout, stderr, log_path.clone());
+    wait_child_write_out(child, out_path, log_path, lang.to_string(), task_id, timeout_ms);
 }
 
 fn run_request_raw(path: &Path, lang: String, task_id: u64) {
@@ -459,7 +409,7 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     let _ = fs::remove_file(path);
 
     if is_utility_lang(&lang) {
-        run_plugkit_verb(&lang.clone(), &code, task_id);
+        run_plugkit_verb(&lang, &code, task_id);
         return;
     }
 
@@ -469,17 +419,16 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     let timeout_ms: u64 = 300_000;
 
     let out_path = done_dir().join(format!("{}.json", task_id));
+    let log_path = log_dir().join(format!("{}.log", task_id));
     let _ = fs::create_dir_all(done_dir());
+    let _ = fs::create_dir_all(log_dir());
     let code_path = pending_dir().join(format!("{}.code", task_id));
     let _ = fs::write(&code_path, &code);
 
-    let out_path_clone = out_path.clone();
     let code_path_clone = code_path.clone();
-
     std::thread::spawn(move || {
-        let result = execute_task(&code, &lang, &cwd, &code_path_clone, timeout_ms, task_id);
+        execute_task_streaming(&code, &lang, &cwd, &code_path_clone, timeout_ms, task_id, out_path, log_path);
         let _ = fs::remove_file(&code_path_clone);
-        let _ = fs::write(&out_path_clone, result.to_string());
     });
 }
 
@@ -516,6 +465,7 @@ fn dispatch_entry(p: &Path) {
 pub fn watch_once() {
     let _ = fs::create_dir_all(pending_dir());
     let _ = fs::create_dir_all(done_dir());
+    let _ = fs::create_dir_all(log_dir());
     if let Ok(rd) = fs::read_dir(pending_dir()) {
         for entry in rd.flatten() {
             let p = entry.path();
@@ -525,9 +475,7 @@ pub fn watch_once() {
                 if let Ok(sub) = fs::read_dir(&p) {
                     for sub_entry in sub.flatten() {
                         let sp = sub_entry.path();
-                        if sp.is_file() {
-                            dispatch_entry(&sp);
-                        }
+                        if sp.is_file() { dispatch_entry(&sp); }
                     }
                 }
             }
