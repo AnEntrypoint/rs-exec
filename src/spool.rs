@@ -236,7 +236,14 @@ fn run_lang_plugin(
     wait_child_write_out(child, out_path, log_path, lang, task_id, timeout_ms);
 }
 
-const UTILITY_LANGS: &[&str] = &["recall", "codesearch", "memorize"];
+const UTILITY_LANGS: &[&str] = &[
+    "recall", "codesearch", "search", "memorize",
+    "sleep", "status", "close",
+    "runner", "type", "kill-port",
+    "forget",
+    "learn-status", "learn-debug", "learn-build",
+    "discipline",
+];
 
 fn is_utility_lang(lang: &str) -> bool { UTILITY_LANGS.contains(&lang) }
 
@@ -279,6 +286,58 @@ fn build_plugkit_args(verb: &str, content: &str) -> Vec<String> {
         "codesearch" | "search" => {
             let query = body.replace('\n', " ");
             vec!["search".into(), query]
+        }
+        "sleep" => {
+            let tid = body.split_whitespace().next().unwrap_or("0").to_string();
+            vec!["sleep".into(), tid]
+        }
+        "status" => {
+            let tid = body.split_whitespace().next().unwrap_or("").to_string();
+            if tid.is_empty() { vec!["status".into()] } else { vec!["status".into(), tid] }
+        }
+        "close" => {
+            let tid = body.split_whitespace().next().unwrap_or("0").to_string();
+            vec!["close".into(), tid]
+        }
+        "runner" => {
+            let action = body.split_whitespace().next().unwrap_or("status").to_string();
+            vec!["runner".into(), action]
+        }
+        "type" => {
+            let mut lines = body.splitn(2, '\n');
+            let tid = lines.next().unwrap_or("").trim().to_string();
+            let stdin = lines.next().unwrap_or("").to_string();
+            let mut v = vec!["type".into(), tid];
+            if !stdin.is_empty() { v.push(stdin); }
+            v
+        }
+        "kill-port" => {
+            let port = body.split_whitespace().next().unwrap_or("0").to_string();
+            vec!["kill-port".into(), port]
+        }
+        "forget" => {
+            let mut parts = body.splitn(2, char::is_whitespace);
+            let kind = parts.next().unwrap_or("").trim().to_string();
+            let target = parts.next().unwrap_or("").trim().to_string();
+            let mut v = vec!["forget".into()];
+            if !kind.is_empty() { v.push(kind); }
+            if !target.is_empty() { v.push(target); }
+            v
+        }
+        "discipline" => {
+            let mut parts = body.splitn(2, char::is_whitespace);
+            let sub = parts.next().unwrap_or("list").trim().to_string();
+            let rest = parts.next().unwrap_or("").trim().to_string();
+            let mut v = vec!["discipline".into(), sub];
+            if !rest.is_empty() { v.push(rest); }
+            v
+        }
+        "learn-status" => vec!["learn".into(), "status".into()],
+        "learn-build" => vec!["learn".into(), "build-communities".into()],
+        "learn-debug" => {
+            let mut v = vec!["learn".into(), "debug".into()];
+            if !body.is_empty() { v.push(body.to_string()); }
+            v
         }
         _ => vec![verb.into(), body.to_string()],
     }
