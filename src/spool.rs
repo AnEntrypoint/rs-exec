@@ -313,14 +313,64 @@ fn run_lang_plugin(
     }
 }
 
+fn ext_to_lang(ext: &str) -> Option<&'static str> {
+    match ext {
+        "js" | "mjs" | "cjs" => Some("nodejs"),
+        "py" => Some("python"),
+        "sh" | "bash" | "zsh" => Some("bash"),
+        "ts" => Some("typescript"),
+        "go" => Some("go"),
+        "rs" => Some("rust"),
+        "ps1" => Some("powershell"),
+        "cmd" => Some("cmd"),
+        "java" => Some("java"),
+        _ => None,
+    }
+}
+
+fn run_request_raw(path: &Path, lang: &'static str) {
+    let code = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = fs::remove_file(path);
+
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("0");
+    let task_id: u64 = stem.parse().unwrap_or(0);
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let timeout_ms: u64 = 300_000;
+
+    let out_path = done_dir().join(format!("{}.json", task_id));
+    let _ = fs::create_dir_all(done_dir());
+    let code_path = pending_dir().join(format!("{}.code", task_id));
+    let _ = fs::write(&code_path, &code);
+
+    let out_path_clone = out_path.clone();
+    let code_path_clone = code_path.clone();
+
+    std::thread::spawn(move || {
+        let result = execute_task(&code, lang, &cwd, &code_path_clone, timeout_ms, task_id);
+        let _ = fs::remove_file(&code_path_clone);
+        let _ = fs::write(&out_path_clone, result.to_string());
+    });
+}
+
 pub fn watch_once() {
     let _ = fs::create_dir_all(pending_dir());
     let _ = fs::create_dir_all(done_dir());
     if let Ok(rd) = fs::read_dir(pending_dir()) {
         for entry in rd.flatten() {
             let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("json") {
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext == "json" {
                 run_request(&p);
+            } else if let Some(lang) = ext_to_lang(ext) {
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if stem.parse::<u64>().is_ok() {
+                    run_request_raw(&p, lang);
+                }
             }
         }
     }
