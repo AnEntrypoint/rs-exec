@@ -47,14 +47,19 @@ fn run_request(path: &Path) {
     let _ = fs::write(&code_path, code);
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rs-exec"));
-    let child = Command::new(exe)
-        .arg("exec")
+    let mut cmd = Command::new(exe);
+    cmd.arg("exec")
         .arg("--lang").arg(lang)
         .arg("--cwd").arg(cwd)
         .arg("--timeout").arg(timeout_ms.to_string())
         .arg("--session").arg(session_id)
-        .arg("--file").arg(&code_path)
-        .spawn();
+        .arg("--file").arg(&code_path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let child = cmd.spawn();
 
     if child.is_err() {
         let _ = fs::write(out_path, serde_json::json!({ "ok": false, "error": "failed to spawn exec" }).to_string());
