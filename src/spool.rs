@@ -94,12 +94,16 @@ fn count_pending_in_inbox() -> u64 {
     n
 }
 
+fn report_binary_version() -> String {
+    std::env::var("PLUGKIT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
+}
+
 fn write_status_json() {
     let path = spool_root().join(".status.json");
     let guard = match status().lock() { Ok(g) => g, Err(p) => p.into_inner() };
     let v = serde_json::json!({
         "pid": std::process::id(),
-        "binary_version": env!("CARGO_PKG_VERSION"),
+        "binary_version": report_binary_version(),
         "started_at": guard.started_at,
         "last_tick_at": iso_now(),
         "tasks_dispatched_this_session": guard.tasks_dispatched,
@@ -711,16 +715,29 @@ pub fn run_daemon() {
     let pid_path = root.join(".watcher.pid");
     let hb_path = root.join(".watcher.heartbeat");
     let _ = fs::write(&pid_path, std::process::id().to_string());
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("watcher panic: {}", info);
+        record_error_status(&msg);
+        let _ = fs::write(spool_root().join(".watcher-panic.log"), &msg);
+    }));
     loop {
-        watch_once();
-        let _ = fs::write(&hb_path, format!(
-            "{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        ));
-        write_status_json();
+        let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            watch_once();
+            let _ = fs::write(&hb_path, format!(
+                "{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            ));
+            write_status_json();
+        }));
+        if let Err(e) = tick {
+            let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
+                else if let Some(s) = e.downcast_ref::<&'static str>() { (*s).to_string() }
+                else { "watcher tick panic (non-string payload)".to_string() };
+            record_error_status(&format!("tick panic survived: {}", msg));
+        }
         std::thread::sleep(Duration::from_millis(300));
     }
 }
