@@ -398,13 +398,23 @@ const UTILITY_LANGS: &[&str] = &[
 fn is_utility_lang(lang: &str) -> bool { UTILITY_LANGS.contains(&lang) }
 
 fn which_plugkit() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("PLUGKIT_BIN") {
+        let pb = PathBuf::from(p);
+        if pb.exists() { return Some(pb); }
+    }
     if let Ok(p) = std::env::var("CLAUDE_PLUGIN_ROOT") {
         let candidate = PathBuf::from(&p).join("bin").join("plugkit");
         if candidate.exists() { return Some(candidate); }
         let candidate_exe = PathBuf::from(&p).join("bin").join("plugkit.exe");
         if candidate_exe.exists() { return Some(candidate_exe); }
     }
-    which::which("plugkit").ok()
+    if let Ok(exe) = std::env::current_exe() {
+        let name = exe.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if name.contains("plugkit") { return Some(exe); }
+    }
+    if let Ok(p) = which::which("plugkit") { return Some(p); }
+    if let Ok(exe) = std::env::current_exe() { return Some(exe); }
+    None
 }
 
 fn build_plugkit_args(verb: &str, content: &str) -> Vec<String> {
@@ -609,7 +619,9 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     let err_stream = err_stream_path(task_id);
     let _ = fs::create_dir_all(done_dir());
     let started = now_ms();
-    let code_path = pending_dir().join(format!("{}.code", task_id));
+    let work_dir = spool_root().join("work");
+    let _ = fs::create_dir_all(&work_dir);
+    let code_path = work_dir.join(format!("{}.code", task_id));
     let _ = fs::write(&code_path, &code);
 
     let code_path_clone = code_path.clone();
