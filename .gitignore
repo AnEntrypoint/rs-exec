@@ -4,6 +4,7 @@
 .prd
 dist/
 .gm/
+.codeinsight
 .codeinsight/
 rs-learn.db
 .plugkit-browser-profile/
