@@ -1,3 +1,7 @@
+## 2026-05-12 ci: cascade fires on pull_request (build smoke, no release)
+
+- `.github/workflows/cascade.yml`: added `pull_request: [main]` trigger. PRs now dispatch `rs-plugkit/build.yml` (downstream build smoke) so the cross-repo cascade is exercised before merge; pushes to main still dispatch `release.yml` as before. Closes the gap where cascade only verified after merge — symptoms previously masked until publish-binaries failed on `main`.
+
 ## 2026-05-12 spool: fix plugkit discovery + code-file race
 
 - `which_plugkit`: add `PLUGKIT_BIN` env, `current_exe` fallback (the watcher process is plugkit itself when rs-exec is linked in), and a last-resort current_exe. Previously codesearch/recall/memorize/search verbs failed with "plugkit not found in PATH" whenever `CLAUDE_PLUGIN_ROOT/bin/plugkit` was absent (e.g. versioned cache layouts like `/root/.cache/plugkit/bin/v0.1.346/plugkit-linux-x64`).
