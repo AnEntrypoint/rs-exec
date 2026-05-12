@@ -1,3 +1,7 @@
+## 2026-05-12 ci: cascade restricted to push-to-main (PR merge only)
+
+- `.github/workflows/cascade.yml`: removed `pull_request: [main]` trigger added earlier the same day. Cascade must only fire on PR merge (i.e., push to main), not on PR open — open PRs were dispatching downstream `rs-plugkit/build.yml` runs against unmerged commits, wasting builds and racing release.yml. Push-to-main remains the sole dispatcher of `rs-plugkit/release.yml`.
+
 ## 2026-05-12 ci: cascade fires on pull_request (build smoke, no release)
 
 - `.github/workflows/cascade.yml`: added `pull_request: [main]` trigger. PRs now dispatch `rs-plugkit/build.yml` (downstream build smoke) so the cross-repo cascade is exercised before merge; pushes to main still dispatch `release.yml` as before. Closes the gap where cascade only verified after merge — symptoms previously masked until publish-binaries failed on `main`.
