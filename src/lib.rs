@@ -1,3 +1,7 @@
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_host;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_spool;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod background_tasks;
 #[cfg(not(target_arch = "wasm32"))]
