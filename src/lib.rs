@@ -1,11 +1,19 @@
+#[cfg(not(target_arch = "wasm32"))]
 pub mod background_tasks;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod kill;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod daemon;
 pub mod obs;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rpc;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod rpc_client;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod spool;
 
 pub const SUBCMD_SESSION_CLEANUP: &str = "session-cleanup";
@@ -74,8 +82,10 @@ macro_rules! seprint {
     ($($arg:tt)*) => { $crate::safe_eprint(&format!("{}", format_args!($($arg)*))) };
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use background_tasks::{task_log_path, append_logfile};
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_exec_process() {
     use std::io::{Read, Write};
     use std::net::TcpStream;

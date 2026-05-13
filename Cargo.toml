@@ -10,25 +10,33 @@ path = "src/lib.rs"
 [[bin]]
 name = "rs-exec"
 path = "src/main.rs"
+required-features = []
 
 [[bin]]
 name = "rs-exec-process"
 path = "src/exec_process.rs"
+required-features = []
+
+[features]
+default = []
+wasm = []
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+anyhow = "1"
+regex = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["json"] }
 tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 rand = "0.8"
-anyhow = "1"
 which = "8.0.2"
 sysinfo = "0.33.1"
 shlex = "1"
 fs2 = "0.4"
-regex = "1"
 dirs = "5"
 
 [target.'cfg(unix)'.dependencies]

@@ -1,0 +1,44 @@
+name: Wasm
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore']
+  workflow_dispatch:
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-wasip1
+
+      - name: Build rs-exec lib for wasm32-wasip1
+        run: cargo build --release --target wasm32-wasip1 --no-default-features --features wasm --lib
+
+      - name: List wasm artifacts
+        run: |
+          ls -la target/wasm32-wasip1/release/ || true
+          find target/wasm32-wasip1/release -name '*.rlib' | head -20
+
+      - name: Upload rs-exec wasm rlib
+        uses: actions/upload-artifact@v4
+        with:
+          name: rs-exec-wasm32-wasip1
+          path: target/wasm32-wasip1/release/librs_exec.rlib
+          if-no-files-found: warn
