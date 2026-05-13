@@ -29,13 +29,13 @@ fn write_result(task_id: u64, stdout: &str, stderr: &str, exit_code: i32, timed_
         "timedOut": timed_out,
         "endedAt": started,
     });
-    let key = format!("outbox:{}", task_id);
+    let key = format!("{}", task_id);
     let s = body.to_string();
-    wasm_host::kv_put(&key, s.as_bytes());
+    wasm_host::kv_put("outbox", &key, s.as_bytes());
 }
 
 pub fn dispatch_pending() -> u32 {
-    let raw = wasm_host::kv_query("inbox:");
+    let raw = wasm_host::kv_query("inbox", "");
     if raw.is_empty() { return 0; }
     let s = match std::str::from_utf8(&raw) { Ok(v) => v, Err(_) => return 0 };
     let tasks: Vec<InboxTask> = match serde_json::from_str(s) { Ok(v) => v, Err(_) => return 0 };
