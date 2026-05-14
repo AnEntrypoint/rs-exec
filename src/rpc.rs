@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, process::{Command, Stdio}, sync::Arc, env, fs, time::{Duration, Instant}};
 use crate::background_tasks::{TaskResult, TaskStatus};
 use crate::runtime::{kill_session_browser, normalize_cwd, resolve_valid_cwd};
-use crate::runner::{AppState, touch_session_activity, port_file, self_exe, normalize_cwd, resolve_valid_cwd};
+use crate::runner::{AppState, touch_session_activity, port_file, self_exe};
 
 fn get_git_status(cwd: &str) -> Value {
     let mut cmd = Command::new("git");
