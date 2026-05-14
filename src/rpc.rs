@@ -3,7 +3,24 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, process::{Command, Stdio}, sync::Arc, env, fs, time::{Duration, Instant}};
 use crate::background_tasks::{TaskResult, TaskStatus};
 use crate::runtime::{kill_session_browser, normalize_cwd, resolve_valid_cwd};
-use crate::runner::{AppState, touch_session_activity, port_file, self_exe};
+use crate::runner::{AppState, touch_session_activity, port_file, self_exe, normalize_cwd, resolve_valid_cwd};
+
+fn get_git_status(cwd: &str) -> Value {
+    let mut cmd = Command::new("git");
+    cmd.args(["status", "--porcelain", "--branch"]).current_dir(cwd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    match cmd.output() {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            json!({ "ok": true, "status": s.trim() })
+        }
+        Err(e) => json!({ "ok": false, "error": e.to_string() })
+    }
+}
 
 pub async fn health() -> Json<Value> { Json(json!({ "ok": true })) }
 
@@ -310,6 +327,31 @@ pub async fn handle_rpc(state: &Arc<AppState>, method: &str, params: &Value) -> 
                 if parts.len() >= 5 && parts[1].ends_with(&port_str) && parts[3] == "LISTENING" { if let Ok(pid) = parts[4].parse::<u32>() { crate::kill::kill_tree(pid); killed_pid = pid; break; } }
             }
             Ok(json!({ "ok": killed_pid != 0, "killedPid": killed_pid }))
+        }
+        "snapshot" => {
+            let sid = params["sessionId"].as_str().unwrap_or("");
+            if sid.is_empty() { return Err(anyhow::anyhow!("sessionId required")); }
+            let cwd_raw = params["workingDirectory"].as_str().unwrap_or(".").to_string();
+            let cwd = resolve_valid_cwd(&normalize_cwd(&cwd_raw));
+
+            let git = get_git_status(&cwd);
+            let tasks = state.store.drain_session_output(sid);
+            let task_list: Vec<Value> = tasks.into_iter().map(|(id, status, output)| {
+                let status_str = match status {
+                    TaskStatus::Pending => "pending",
+                    TaskStatus::Running => "running",
+                    TaskStatus::Completed => "completed",
+                    TaskStatus::Failed => "failed"
+                };
+                let out: Vec<Value> = output.into_iter().map(|e| json!({ "s": e.stream, "d": e.data })).collect();
+                json!({ "id": id, "status": status_str, "output": out })
+            }).collect();
+
+            Ok(json!({
+                "git": git,
+                "tasks": task_list,
+                "cwd": cwd,
+            }))
         }
         "shutdown" => { tokio::spawn(async { tokio::time::sleep(Duration::from_millis(100)).await; std::process::exit(0); }); Ok(json!({ "ok": true })) }
         _ => Err(anyhow::anyhow!("Unknown method: {}", method))
