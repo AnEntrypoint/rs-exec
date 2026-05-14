@@ -3,7 +3,10 @@ use std::io::{BufRead, BufReader, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
+use notify::{RecursiveMode, Watcher};
+use std::sync::mpsc::RecvTimeoutError;
 
 static STATUS: OnceLock<Mutex<StatusState>> = OnceLock::new();
 
@@ -218,6 +221,7 @@ fn write_meta(
     started_at_ms: u128,
     timed_out: bool,
     error: Option<&str>,
+    session_id: &str,
 ) {
     let ended = now_ms();
     let mut v = serde_json::json!({
@@ -229,6 +233,7 @@ fn write_meta(
         "timedOut": timed_out,
         "startedAt": started_at_ms as u64,
         "endedAt": ended as u64,
+        "sessionId": session_id,
     });
     if let Some(e) = error {
         v["error"] = serde_json::Value::String(e.to_string());
@@ -243,6 +248,7 @@ fn wait_child_write_meta(
     task_id: u64,
     timeout_ms: u64,
     started_at_ms: u128,
+    session_id: &str,
 ) {
     let deadline = Duration::from_millis(timeout_ms.saturating_add(5_000));
     let start = std::time::Instant::now();
@@ -251,20 +257,20 @@ fn wait_child_write_meta(
             Ok(Some(status)) => {
                 let exit_code = status.code().unwrap_or(1);
                 std::thread::sleep(Duration::from_millis(100));
-                write_meta(&meta_path, task_id, &lang, exit_code == 0, exit_code, started_at_ms, false, None);
+                write_meta(&meta_path, task_id, &lang, exit_code == 0, exit_code, started_at_ms, false, None, session_id);
                 return;
             }
             Ok(None) => {
                 if start.elapsed() >= deadline {
                     let _ = child.kill();
                     std::thread::sleep(Duration::from_millis(100));
-                    write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, true, None);
+                    write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, true, None, session_id);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, false, Some(&format!("wait error: {}", e)));
+                write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, false, Some(&format!("wait error: {}", e)), session_id);
                 return;
             }
         }
@@ -282,14 +288,15 @@ fn execute_task_streaming(
     out_stream: PathBuf,
     err_stream: PathBuf,
     started_at_ms: u128,
+    session_id: &str,
 ) {
     if is_builtin(lang) {
-        run_builtin(code_path, lang, cwd, timeout_ms, task_id, meta_path, out_stream, err_stream, started_at_ms);
+        run_builtin(code_path, lang, cwd, timeout_ms, task_id, meta_path, out_stream, err_stream, started_at_ms, session_id);
     } else {
         match find_lang_plugin(lang, cwd) {
-            Some(plugin_path) => run_lang_plugin(&plugin_path, code, cwd, timeout_ms, task_id, meta_path, out_stream, err_stream, started_at_ms),
+            Some(plugin_path) => run_lang_plugin(&plugin_path, code, cwd, timeout_ms, task_id, meta_path, out_stream, err_stream, started_at_ms, session_id),
             None => {
-                write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("unknown lang '{}': not a builtin and no lang plugin found", lang)));
+                write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("unknown lang '{}': not a builtin and no lang plugin found", lang)), session_id);
             }
         }
     }
@@ -305,6 +312,7 @@ fn run_builtin(
     out_stream: PathBuf,
     err_stream: PathBuf,
     started_at_ms: u128,
+    session_id: &str,
 ) {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rs-exec"));
     let mut cmd = Command::new(&exe);
@@ -325,7 +333,7 @@ fn run_builtin(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("spawn failed: {}", e)));
+            write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("spawn failed: {}", e)), session_id);
             return;
         }
     };
@@ -333,7 +341,7 @@ fn run_builtin(
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     stream_child_to_files(stdout, stderr, out_stream, err_stream);
-    wait_child_write_meta(child, meta_path, lang.to_string(), task_id, timeout_ms, started_at_ms);
+    wait_child_write_meta(child, meta_path, lang.to_string(), task_id, timeout_ms, started_at_ms, session_id);
 }
 
 fn run_lang_plugin(
@@ -346,6 +354,7 @@ fn run_lang_plugin(
     out_stream: PathBuf,
     err_stream: PathBuf,
     started_at_ms: u128,
+    session_id: &str,
 ) {
     let lang = plugin_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
     let escaped_code = serde_json::to_string(code).unwrap_or_else(|_| "\"\"".to_string());
@@ -373,7 +382,7 @@ fn run_lang_plugin(
         Ok(c) => c,
         Err(e) => {
             let err_msg = if e.kind() == std::io::ErrorKind::NotFound { "bun not found".to_string() } else { format!("spawn failed: {}", e) };
-            write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, false, Some(&err_msg));
+            write_meta(&meta_path, task_id, &lang, false, -1, started_at_ms, false, Some(&err_msg), session_id);
             return;
         }
     };
@@ -381,7 +390,7 @@ fn run_lang_plugin(
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     stream_child_to_files(stdout, stderr, out_stream, err_stream);
-    wait_child_write_meta(child, meta_path, lang, task_id, timeout_ms, started_at_ms);
+    wait_child_write_meta(child, meta_path, lang, task_id, timeout_ms, started_at_ms, session_id);
 }
 
 const UTILITY_LANGS: &[&str] = &[
@@ -512,7 +521,7 @@ fn build_plugkit_args(verb: &str, content: &str) -> Vec<String> {
     }
 }
 
-fn run_plugkit_verb(verb: &str, content: &str, task_id: u64) {
+fn run_plugkit_verb(verb: &str, content: &str, task_id: u64, session_id: &str) {
     let meta = meta_path(task_id);
     let out_stream = out_stream_path(task_id);
     let err_stream = err_stream_path(task_id);
@@ -522,16 +531,17 @@ fn run_plugkit_verb(verb: &str, content: &str, task_id: u64) {
     let exe = match which_plugkit() {
         Some(p) => p,
         None => {
-            write_meta(&meta, task_id, verb, false, -1, started, false, Some("plugkit not found in PATH"));
+            write_meta(&meta, task_id, verb, false, -1, started, false, Some("plugkit not found in PATH"), session_id);
             return;
         }
     };
 
     let args = build_plugkit_args(verb, content);
     let verb_owned = verb.to_string();
+    let session_id_owned = session_id.to_string();
 
     std::thread::spawn(move || {
-        run_subprocess_streaming(&exe, &args, &verb_owned, task_id, 300_000, meta, out_stream, err_stream, started);
+        run_subprocess_streaming(&exe, &args, &verb_owned, task_id, 300_000, meta, out_stream, err_stream, started, &session_id_owned);
     });
 }
 
@@ -545,6 +555,7 @@ fn run_subprocess_streaming(
     out_stream: PathBuf,
     err_stream: PathBuf,
     started_at_ms: u128,
+    session_id: &str,
 ) {
     let mut cmd = Command::new(exe);
     for a in args { cmd.arg(a); }
@@ -558,7 +569,7 @@ fn run_subprocess_streaming(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("spawn failed: {}", e)));
+            write_meta(&meta_path, task_id, lang, false, -1, started_at_ms, false, Some(&format!("spawn failed: {}", e)), session_id);
             return;
         }
     };
@@ -566,10 +577,10 @@ fn run_subprocess_streaming(
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     stream_child_to_files(stdout, stderr, out_stream, err_stream);
-    wait_child_write_meta(child, meta_path, lang.to_string(), task_id, timeout_ms, started_at_ms);
+    wait_child_write_meta(child, meta_path, lang.to_string(), task_id, timeout_ms, started_at_ms, session_id);
 }
 
-fn run_request_raw(path: &Path, lang: String, task_id: u64) {
+fn run_request_raw(path: &Path, lang: String, task_id: u64, session_id: String) {
     let code = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return,
@@ -585,27 +596,28 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
             "wait" => {
                 let secs: u64 = code.trim().parse().unwrap_or(0);
                 if secs == 0 {
-                    write_meta(&meta, task_id, "wait", false, -1, started, false, Some("exec:wait requires <seconds>"));
+                    write_meta(&meta, task_id, "wait", false, -1, started, false, Some("exec:wait requires <seconds>"), &session_id);
                     return;
                 }
                 let secs = secs.min(3600);
+                let session_id_clone = session_id.clone();
                 std::thread::spawn(move || {
                     truncate(&out_stream);
                     std::thread::sleep(Duration::from_secs(secs));
                     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&out_stream) {
                         let _ = writeln!(f, "slept {}s", secs);
                     }
-                    write_meta(&meta, task_id, "wait", true, 0, started, false, None);
+                    write_meta(&meta, task_id, "wait", true, 0, started, false, None, &session_id_clone);
                 });
                 return;
             }
             "pause" => {
-                write_meta(&meta, task_id, "pause", false, -1, started, false, Some("exec:pause via spool not yet wired — pause currently mutates .gm/prd.yml via Bash hook path. Residual: spool dispatch for pause pending."));
+                write_meta(&meta, task_id, "pause", false, -1, started, false, Some("exec:pause via spool not yet wired — pause currently mutates .gm/prd.yml via Bash hook path. Residual: spool dispatch for pause pending."), &session_id);
                 return;
             }
             _ => {}
         }
-        run_plugkit_verb(&lang, &code, task_id);
+        run_plugkit_verb(&lang, &code, task_id, &session_id);
         return;
     }
 
@@ -625,8 +637,9 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64) {
     let _ = fs::write(&code_path, &code);
 
     let code_path_clone = code_path.clone();
+    let session_id_clone = session_id.clone();
     std::thread::spawn(move || {
-        execute_task_streaming(&code, &lang, &cwd, &code_path_clone, timeout_ms, task_id, meta, out_stream, err_stream, started);
+        execute_task_streaming(&code, &lang, &cwd, &code_path_clone, timeout_ms, task_id, meta, out_stream, err_stream, started, &session_id_clone);
         let _ = fs::remove_file(&code_path_clone);
     });
 }
@@ -648,7 +661,7 @@ fn ext_to_lang(ext: &str) -> Option<&'static str> {
     }
 }
 
-fn dispatch_entry(p: &Path) {
+fn dispatch_entry(p: &Path, session_id: String) {
     let components: Vec<_> = p.components().collect();
     let n = components.len();
 
@@ -661,13 +674,13 @@ fn dispatch_entry(p: &Path) {
             let lang_from_dir = parent_name.to_lowercase();
             if let Ok(task_id) = stem.parse::<u64>() {
                 record_dispatch_status(task_id, &lang_from_dir, &p.to_string_lossy());
-                run_request_raw(p, lang_from_dir, task_id);
+                run_request_raw(p, lang_from_dir, task_id, session_id);
                 return;
             }
         } else if let Some(lang_from_ext) = ext_to_lang(ext) {
             if let Ok(task_id) = stem.parse::<u64>() {
                 record_dispatch_status(task_id, lang_from_ext, &p.to_string_lossy());
-                run_request_raw(p, lang_from_ext.to_string(), task_id);
+                run_request_raw(p, lang_from_ext.to_string(), task_id, session_id);
                 return;
             }
         } else {
@@ -702,18 +715,19 @@ fn file_is_stable(p: &Path) -> bool {
 }
 
 pub fn watch_once() {
+    let session_id = std::env::var("SESSION_ID").unwrap_or_else(|_| format!("spool-{}", uuid::Uuid::new_v4()));
     let _ = fs::create_dir_all(pending_dir());
     let _ = fs::create_dir_all(done_dir());
     if let Ok(rd) = fs::read_dir(pending_dir()) {
         for entry in rd.flatten() {
             let p = entry.path();
             if p.is_file() {
-                if file_is_stable(&p) { dispatch_entry(&p); }
+                if file_is_stable(&p) { dispatch_entry(&p, session_id.clone()); }
             } else if p.is_dir() {
                 if let Ok(sub) = fs::read_dir(&p) {
                     for sub_entry in sub.flatten() {
                         let sp = sub_entry.path();
-                        if sp.is_file() && file_is_stable(&sp) { dispatch_entry(&sp); }
+                        if sp.is_file() && file_is_stable(&sp) { dispatch_entry(&sp, session_id.clone()); }
                     }
                 }
             }
@@ -727,14 +741,88 @@ pub fn run_daemon() {
     let pid_path = root.join(".watcher.pid");
     let hb_path = root.join(".watcher.heartbeat");
     let _ = fs::write(&pid_path, std::process::id().to_string());
+    let session_id = std::env::var("SESSION_ID").unwrap_or_else(|_| format!("spool-{}", uuid::Uuid::new_v4()));
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("watcher panic: {}", info);
         record_error_status(&msg);
         let _ = fs::write(spool_root().join(".watcher-panic.log"), &msg);
     }));
+
+    let pending_root = pending_dir();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx_clone = tx.clone();
+
+    let pending_root_clone = pending_root.clone();
+    let watcher_thread = std::thread::spawn(move || {
+        if let Ok(mut w) = notify::recommended_watcher(
+            move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    for path in ev.paths {
+                        let _ = tx_clone.send(path);
+                    }
+                }
+            }
+        ) {
+            let _ = w.watch(&pending_root_clone, RecursiveMode::Recursive);
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+    });
+
+    let mut pending_paths: HashSet<PathBuf> = HashSet::new();
+    let mut last_debounce: HashMap<PathBuf, Instant> = HashMap::new();
+    const DEBOUNCE_MS: u64 = 10;
+    let mut poll_fallback = false;
+
+    std::thread::sleep(Duration::from_millis(50));
+    if watcher_thread.is_finished() {
+        poll_fallback = true;
+    }
+
     loop {
         let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            watch_once();
+            if !poll_fallback {
+                let now = Instant::now();
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(DEBOUNCE_MS)) {
+                        Ok(path) => {
+                            pending_paths.insert(path);
+                        }
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            poll_fallback = true;
+                            break;
+                        }
+                    }
+                }
+
+                if !poll_fallback {
+                    let mut ready_paths = Vec::new();
+                    for path in pending_paths.iter() {
+                        if let Some(&last_update) = last_debounce.get(path) {
+                            if now.duration_since(last_update) >= Duration::from_millis(DEBOUNCE_MS) {
+                                ready_paths.push(path.clone());
+                            }
+                        } else {
+                            ready_paths.push(path.clone());
+                        }
+                    }
+
+                    for path in ready_paths {
+                        if file_is_stable(&path) && path.is_file() {
+                            dispatch_entry(&path, session_id.clone());
+                        }
+                        pending_paths.remove(&path);
+                        last_debounce.insert(path, now);
+                    }
+                }
+            }
+
+            if poll_fallback {
+                watch_once();
+            }
+
             let _ = fs::write(&hb_path, format!(
                 "{}",
                 std::time::SystemTime::now()
@@ -750,6 +838,6 @@ pub fn run_daemon() {
                 else { "watcher tick panic (non-string payload)".to_string() };
             record_error_status(&format!("tick panic survived: {}", msg));
         }
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
