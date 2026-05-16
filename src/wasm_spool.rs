@@ -14,9 +14,10 @@ struct InboxTask {
     timeout_ms: u64,
 }
 
-const REJECTED: &[&str] = &["python","py","bash","sh","shell","zsh","ssh","runner","type","kill-port","powershell","ps1","go","rust","c","cpp","java","deno"];
-
-fn is_rejected(lang: &str) -> bool { REJECTED.contains(&lang) }
+fn is_rejected(lang: &str) -> bool {
+    // No languages rejected in WASM — all map to thebird host_exec_js emulation
+    false
+}
 
 fn write_result(task_id: u64, stdout: &str, stderr: &str, exit_code: i32, timed_out: bool) {
     let started = wasm_host::now_ms();
@@ -51,23 +52,24 @@ fn dispatch_one(t: &InboxTask) {
     let lang_l = t.lang.to_ascii_lowercase();
     let normalized = match lang_l.as_str() {
         "nodejs" | "javascript" | "node" | "js" => "nodejs",
+        "python" | "py" => "python",
+        "bash" | "sh" | "shell" | "zsh" => "bash",
+        "powershell" | "ps1" => "powershell",
+        "go" | "golang" => "go",
+        "rust" | "rs" => "rust",
+        "c" => "c",
+        "cpp" | "c++" | "cxx" => "cpp",
+        "java" => "java",
+        "typescript" | "ts" => "typescript",
+        "deno" => "deno",
+        "ssh" => "ssh",
         other => other,
     };
-    if is_rejected(normalized) {
-        let msg = format!("language unavailable in browser: {}", t.lang);
-        write_result(t.task_id, "", &format!("--- stderr ---\n{}\n", msg), 1, false);
-        wasm_host::log(&format!("[wasm-spool] rejected task {} lang={}", t.task_id, t.lang));
-        return;
-    }
-    if normalized != "nodejs" {
-        let msg = format!("language unavailable in browser: {}", t.lang);
-        write_result(t.task_id, "", &format!("--- stderr ---\n{}\n", msg), 1, false);
-        return;
-    }
     let opts = serde_json::json!({
         "taskId": t.task_id,
         "cwd": t.cwd,
         "timeoutMs": if t.timeout_ms == 0 { 300_000u64 } else { t.timeout_ms },
+        "lang": normalized,
     }).to_string();
     let (status, out) = wasm_host::exec_js(&t.code, &opts);
     let stdout = std::str::from_utf8(&out).unwrap_or("").to_string();
