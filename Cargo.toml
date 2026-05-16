@@ -6,6 +6,7 @@ edition = "2021"
 [lib]
 name = "rs_exec"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "rs-exec"
