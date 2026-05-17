@@ -129,6 +129,42 @@ fn record_error_status(msg: &str) {
     }
 }
 
+fn gm_log_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("GM_LOG_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".claude").join("gm-log");
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        return PathBuf::from(home).join(".claude").join("gm-log");
+    }
+    PathBuf::from(".gm").join("log")
+}
+
+fn emit_exec_log(task_id: u64, lang: &str, elapsed_ms: u128, exit_code: i32, truncated_stdout: bool) {
+    if std::env::var("GM_LOG_DISABLE").is_ok() { return; }
+
+    let now = iso_now();
+    let date_part = now.split('T').next().unwrap_or("2026-01-01");
+    let log_dir = gm_log_dir().join(date_part);
+    let _ = fs::create_dir_all(&log_dir);
+
+    let log_path = log_dir.join("exec.jsonl");
+    let entry = serde_json::json!({
+        "timestamp": now,
+        "task_id": task_id,
+        "lang": lang,
+        "elapsed_ms": elapsed_ms,
+        "exit_code": exit_code,
+        "truncated_stdout": truncated_stdout,
+    });
+
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = writeln!(f, "{}", entry.to_string());
+    }
+}
+
 const BUILTIN_LANGS: &[&str] = &[
     "nodejs", "javascript", "node", "js",
     "python", "py",
@@ -224,12 +260,13 @@ fn write_meta(
     session_id: &str,
 ) {
     let ended = now_ms();
+    let duration = (ended - started_at_ms) as u128;
     let mut v = serde_json::json!({
         "taskId": task_id,
         "lang": lang,
         "ok": ok,
         "exitCode": exit_code,
-        "durationMs": (ended - started_at_ms) as u64,
+        "durationMs": duration as u64,
         "timedOut": timed_out,
         "startedAt": started_at_ms as u64,
         "endedAt": ended as u64,
@@ -239,6 +276,7 @@ fn write_meta(
         v["error"] = serde_json::Value::String(e.to_string());
     }
     let _ = fs::write(meta_path, v.to_string());
+    emit_exec_log(task_id, lang, duration, exit_code, false);
 }
 
 fn wait_child_write_meta(
