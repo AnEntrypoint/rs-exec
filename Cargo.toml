@@ -6,41 +6,12 @@ edition = "2021"
 [lib]
 name = "rs_exec"
 path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
-
-[[bin]]
-name = "rs-exec"
-path = "src/main.rs"
-required-features = []
-
-[[bin]]
-name = "rs-exec-process"
-path = "src/exec_process.rs"
-required-features = []
+crate-type = ["cdylib"]
 
 [features]
-default = []
 wasm = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-regex = "1"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1", features = ["full"] }
-axum = { version = "0.7", features = ["json"] }
-tempfile = "3"
-clap = { version = "4", features = ["derive"] }
-rand = "0.8"
-which = "8.0.2"
-sysinfo = "0.33.1"
-shlex = "1"
-fs2 = "0.4"
-dirs = "5"
-notify = "7"
-uuid = { version = "1", features = ["v4"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
