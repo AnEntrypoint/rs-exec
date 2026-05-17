@@ -612,7 +612,27 @@ fn run_request_raw(path: &Path, lang: String, task_id: u64, session_id: String) 
                 return;
             }
             "pause" => {
-                write_meta(&meta, task_id, "pause", false, -1, started, false, Some("exec:pause via spool not yet wired — pause currently mutates .gm/prd.yml via Bash hook path. Residual: spool dispatch for pause pending."), &session_id);
+                let prd_path = std::env::current_dir()
+                    .ok()
+                    .map(|p| p.join(".gm").join("prd.yml"))
+                    .unwrap_or_else(|| PathBuf::from(".gm/prd.yml"));
+
+                let pause_meta = serde_json::json!({
+                    "paused_at": iso_now(),
+                    "session_id": session_id,
+                    "pause_reason": code,
+                });
+
+                let _ = fs::write(&prd_path, serde_json::to_string_pretty(&pause_meta).unwrap_or_default());
+
+                let meta = meta_path(task_id);
+                let result = serde_json::json!({
+                    "ok": true,
+                    "message": "execution paused",
+                    "prd_path": prd_path.to_string_lossy(),
+                });
+                let _ = fs::write(&meta, result.to_string());
+                write_meta(&meta, task_id, "pause", true, 0, started, false, None, &session_id);
                 return;
             }
             _ => {}
