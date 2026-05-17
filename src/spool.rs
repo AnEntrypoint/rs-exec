@@ -440,6 +440,7 @@ const UTILITY_LANGS: &[&str] = &[
     "discipline",
     "wait", "pause", "browser", "feedback",
     "health",
+    "transition", "mutable-resolve", "memorize-fire", "phase-status",
 ];
 
 fn is_utility_lang(lang: &str) -> bool { UTILITY_LANGS.contains(&lang) }
