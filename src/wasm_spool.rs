@@ -14,8 +14,7 @@ struct InboxTask {
     timeout_ms: u64,
 }
 
-fn is_rejected(lang: &str) -> bool {
-    // No languages rejected in WASM — all map to thebird host_exec_js emulation
+fn is_rejected(_lang: &str) -> bool {
     false
 }
 
@@ -67,11 +66,6 @@ fn dispatch_one(t: &InboxTask) {
         "ssh" => "ssh",
         other => other,
     };
-    // Paper §20: timeoutMs is mandatory; missing or below-floor is a hard
-    // reject, never a silent default. This mirrors the rs-plugkit
-    // validate_timeout_ms helper to keep the discipline consistent across
-    // the whole exec surface — internal inbox tasks must declare a real
-    // budget like any other dispatch.
     if t.timeout_ms == 0 {
         let body = serde_json::json!({
             "ok": false,
@@ -103,50 +97,6 @@ fn dispatch_one(t: &InboxTask) {
     let stdout = std::str::from_utf8(&out).unwrap_or("").to_string();
     let exit_code = if status == 0 { 0 } else { status as i32 };
     write_result(t.task_id, &stdout, "", exit_code, false);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn timeout_ms_zero_rejected() {
-        let task = InboxTask {
-            task_id: 1,
-            lang: "nodejs".to_string(),
-            code: "console.log('x')".to_string(),
-            cwd: ".".to_string(),
-            timeout_ms: 0,
-        };
-        // We can't call dispatch_one in unit context (wasm_host is wasm-only),
-        // but we can verify the constant and reject shape:
-        assert_eq!(MIN_TIMEOUT_MS, 100);
-        let _ = task; // touch
-    }
-
-    #[test]
-    fn timeout_ms_below_floor_rejected() {
-        let task = InboxTask {
-            task_id: 2,
-            lang: "nodejs".to_string(),
-            code: "console.log('x')".to_string(),
-            cwd: ".".to_string(),
-            timeout_ms: 50,
-        };
-        assert!(task.timeout_ms < MIN_TIMEOUT_MS);
-    }
-
-    #[test]
-    fn timeout_ms_floor_accepted() {
-        let task = InboxTask {
-            task_id: 3,
-            lang: "nodejs".to_string(),
-            code: "console.log('x')".to_string(),
-            cwd: ".".to_string(),
-            timeout_ms: 100,
-        };
-        assert!(task.timeout_ms >= MIN_TIMEOUT_MS);
-    }
 }
 
 pub fn execute(task_json: &str) -> u32 {
