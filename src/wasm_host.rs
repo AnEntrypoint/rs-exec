@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#[link(wasm_import_module = "env")]
 extern "C" {
     pub fn host_kv_get(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32) -> u64;
     pub fn host_kv_put(ns_ptr: *const u8, ns_len: u32, key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> u32;
