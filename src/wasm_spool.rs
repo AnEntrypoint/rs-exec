@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use crate::wasm_host;
 use serde::Deserialize;
 
@@ -14,10 +13,6 @@ struct InboxTask {
     timeout_ms: u64,
 }
 
-fn is_rejected(_lang: &str) -> bool {
-    false
-}
-
 fn write_result(task_id: u64, stdout: &str, stderr: &str, exit_code: i32, timed_out: bool) {
     let started = wasm_host::now_ms();
     let body = serde_json::json!({
@@ -31,7 +26,9 @@ fn write_result(task_id: u64, stdout: &str, stderr: &str, exit_code: i32, timed_
     });
     let key = format!("{}", task_id);
     let s = body.to_string();
-    wasm_host::kv_put("outbox", &key, s.as_bytes());
+    if !wasm_host::kv_put("outbox", &key, s.as_bytes()) {
+        wasm_host::log(&format!("write_result: kv_put failed for task_id={}", task_id));
+    }
 }
 
 pub fn dispatch_pending() -> u32 {
