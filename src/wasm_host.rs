@@ -54,7 +54,7 @@ pub fn kv_put(namespace: &str, key: &str, val: &[u8]) -> bool {
             val.len() as u32,
         )
     };
-    r == 0
+    r != 0
 }
 
 pub fn kv_query(namespace: &str, query: &str) -> Vec<u8> {
