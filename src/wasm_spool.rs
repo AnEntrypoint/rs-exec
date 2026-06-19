@@ -68,7 +68,7 @@ fn dispatch_one(t: &InboxTask) {
             "ok": false,
             "error": "missing timeoutMs",
             "required": "positive integer milliseconds",
-            "paper_ref": "§20",
+            "paper_ref": "s20",
         });
         write_result(t.task_id, &body.to_string(), "", 1, false);
         return;
@@ -79,7 +79,7 @@ fn dispatch_one(t: &InboxTask) {
             "error": "timeoutMs below floor",
             "min": MIN_TIMEOUT_MS,
             "received": t.timeout_ms,
-            "paper_ref": "§20",
+            "paper_ref": "s20",
         });
         write_result(t.task_id, &body.to_string(), "", 1, false);
         return;
