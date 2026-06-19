@@ -35,11 +35,18 @@ pub fn dispatch_pending() -> u32 {
     let raw = wasm_host::kv_query("inbox", "");
     if raw.is_empty() { return 0; }
     let s = match std::str::from_utf8(&raw) { Ok(v) => v, Err(_) => return 0 };
-    let tasks: Vec<InboxTask> = match serde_json::from_str(s) { Ok(v) => v, Err(_) => return 0 };
+    let raw_tasks: Vec<serde_json::Value> = match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
     let mut n = 0u32;
-    for t in &tasks {
-        dispatch_one(t);
-        n += 1;
+    for raw_task in &raw_tasks {
+        match serde_json::from_value::<InboxTask>(raw_task.clone()) {
+            Ok(t) => { dispatch_one(&t); n += 1; }
+            Err(e) => {
+                wasm_host::log(&format!("dispatch_pending: malformed task skipped: {}", e));
+            }
+        }
     }
     n
 }
@@ -68,7 +75,6 @@ fn dispatch_one(t: &InboxTask) {
             "ok": false,
             "error": "missing timeoutMs",
             "required": "positive integer milliseconds",
-            "paper_ref": "s20",
         });
         write_result(t.task_id, &body.to_string(), "", 1, false);
         return;
@@ -79,7 +85,6 @@ fn dispatch_one(t: &InboxTask) {
             "error": "timeoutMs below floor",
             "min": MIN_TIMEOUT_MS,
             "received": t.timeout_ms,
-            "paper_ref": "s20",
         });
         write_result(t.task_id, &body.to_string(), "", 1, false);
         return;
@@ -90,10 +95,8 @@ fn dispatch_one(t: &InboxTask) {
         "timeoutMs": t.timeout_ms,
         "lang": normalized,
     }).to_string();
-    let (status, out) = wasm_host::exec_js(&t.code, &opts);
-    let stdout = std::str::from_utf8(&out).unwrap_or("").to_string();
-    let exit_code = if status == 0 { 0 } else { status as i32 };
-    write_result(t.task_id, &stdout, "", exit_code, false);
+    let result = wasm_host::exec_js(&t.code, &opts);
+    write_result(t.task_id, &result.stdout, &result.stderr, result.exit_code, result.timed_out);
 }
 
 pub fn execute(task_json: &str) -> u32 {

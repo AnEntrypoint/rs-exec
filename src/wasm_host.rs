@@ -18,7 +18,7 @@ unsafe fn take_bytes(packed: u64) -> Vec<u8> {
     if ptr == 0 || len == 0 {
         return Vec::new();
     }
-    Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize)
+    std::slice::from_raw_parts(ptr as *const u8, len as usize).to_vec()
 }
 
 pub fn log(msg: &str) {
@@ -68,7 +68,14 @@ pub fn kv_query(namespace: &str, query: &str) -> Vec<u8> {
     unsafe { take_bytes(packed) }
 }
 
-pub fn exec_js(code: &str, opts_json: &str) -> (u32, Vec<u8>) {
+pub struct ExecResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+pub fn exec_js(code: &str, opts_json: &str) -> ExecResult {
     let packed = unsafe {
         host_exec_js(
             code.as_ptr(),
@@ -78,6 +85,24 @@ pub fn exec_js(code: &str, opts_json: &str) -> (u32, Vec<u8>) {
         )
     };
     let bytes = unsafe { take_bytes(packed) };
-    let status = if bytes.is_empty() { 1 } else { 0 };
-    (status, bytes)
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(v) => {
+            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+            let exit_code = v.get("exit_code")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(if ok { 0 } else { 1 }) as i32;
+            ExecResult {
+                exit_code,
+                stdout: v.get("stdout").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                stderr: v.get("stderr").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                timed_out: v.get("timed_out").and_then(|x| x.as_bool()).unwrap_or(false),
+            }
+        }
+        Err(_) => ExecResult {
+            exit_code: 1,
+            stdout: String::from_utf8_lossy(&bytes).into_owned(),
+            stderr: String::new(),
+            timed_out: false,
+        },
+    }
 }
