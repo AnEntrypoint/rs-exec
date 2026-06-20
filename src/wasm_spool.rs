@@ -14,7 +14,7 @@ struct InboxTask {
 }
 
 fn write_result(task_id: u64, stdout: &str, stderr: &str, exit_code: i32, timed_out: bool) {
-    let started = wasm_host::now_ms();
+    let ended_at = wasm_host::now_ms();
     let body = serde_json::json!({
         "taskId": task_id,
         "ok": exit_code == 0,
@@ -22,7 +22,7 @@ fn write_result(task_id: u64, stdout: &str, stderr: &str, exit_code: i32, timed_
         "stdout": stdout,
         "stderr": stderr,
         "timedOut": timed_out,
-        "endedAt": started,
+        "endedAt": ended_at,
     });
     let key = format!("{}", task_id);
     let s = body.to_string();
@@ -37,7 +37,10 @@ pub fn dispatch_pending() -> u32 {
     let s = match std::str::from_utf8(&raw) { Ok(v) => v, Err(_) => return 0 };
     let raw_tasks: Vec<serde_json::Value> = match serde_json::from_str(s) {
         Ok(v) => v,
-        Err(_) => return 0,
+        Err(e) => {
+            wasm_host::log(&format!("dispatch_pending: malformed inbox batch, 0 dispatched: {}", e));
+            return 0;
+        }
     };
     let mut n = 0u32;
     for raw_task in &raw_tasks {
