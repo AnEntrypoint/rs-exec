@@ -47,7 +47,12 @@ pub fn dispatch_pending() -> u32 {
         match serde_json::from_value::<InboxTask>(raw_task.clone()) {
             Ok(t) => { dispatch_one(&t); n += 1; }
             Err(e) => {
-                wasm_host::log(&format!("dispatch_pending: malformed task skipped: {}", e));
+                let err = format!("dispatch_pending: malformed task: {}", e);
+                wasm_host::log(&err);
+                if let Some(task_id) = raw_task.get("taskId").and_then(|v| v.as_u64()) {
+                    write_result(task_id, "", &err, 1, false);
+                    n += 1;
+                }
             }
         }
     }
