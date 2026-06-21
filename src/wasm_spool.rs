@@ -55,6 +55,7 @@ pub fn dispatch_pending() -> u32 {
 }
 
 const MIN_TIMEOUT_MS: u64 = 100;
+const MAX_TIMEOUT_MS: u64 = 600_000;
 
 fn dispatch_one(t: &InboxTask) {
     let lang_l = t.lang.to_ascii_lowercase();
@@ -79,7 +80,7 @@ fn dispatch_one(t: &InboxTask) {
             "error": "missing timeoutMs",
             "required": "positive integer milliseconds",
         });
-        write_result(t.task_id, &body.to_string(), "", 1, false);
+        write_result(t.task_id, "", &body.to_string(), 1, false);
         return;
     }
     if t.timeout_ms < MIN_TIMEOUT_MS {
@@ -89,13 +90,14 @@ fn dispatch_one(t: &InboxTask) {
             "min": MIN_TIMEOUT_MS,
             "received": t.timeout_ms,
         });
-        write_result(t.task_id, &body.to_string(), "", 1, false);
+        write_result(t.task_id, "", &body.to_string(), 1, false);
         return;
     }
+    let timeout_ms = t.timeout_ms.min(MAX_TIMEOUT_MS);
     let opts = serde_json::json!({
         "taskId": t.task_id,
         "cwd": t.cwd,
-        "timeoutMs": t.timeout_ms,
+        "timeoutMs": timeout_ms,
         "lang": normalized,
     }).to_string();
     let result = wasm_host::exec_js(&t.code, &opts);
