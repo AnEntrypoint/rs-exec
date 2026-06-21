@@ -6,10 +6,7 @@ edition = "2021"
 [lib]
 name = "rs_exec"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
-
-[features]
-wasm = []
+crate-type = ["cdylib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
